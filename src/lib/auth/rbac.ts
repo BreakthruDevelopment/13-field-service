@@ -4,7 +4,8 @@
  * handler calls these before touching data.
  */
 
-export const ROLES = ["user", "admin"] as const;
+/** `user` is waiting for access. `technician` and `dispatcher` are granted by an admin. Exactly one role. */
+export const ROLES = ["user", "technician", "dispatcher", "admin"] as const;
 export type Role = (typeof ROLES)[number];
 
 export type Actor = { id: string; role: Role };
@@ -18,11 +19,18 @@ export function isRole(value: unknown): value is Role {
   return typeof value === "string" && (ROLES as readonly string[]).includes(value);
 }
 
-/** Better Auth's admin plugin can store comma-separated roles; take the strongest. */
+/**
+ * Better Auth's admin plugin can store comma-separated roles. Return exactly one, the strongest
+ * (admin, then dispatcher, then technician, then user). Unknown names are `user`.
+ * Admin is not a superset of dispatcher or technician.
+ */
 export function toRole(value: string | null | undefined): Role {
   if (!value) return "user";
   const parts = value.split(",").map((p) => p.trim());
-  return parts.includes("admin") ? "admin" : "user";
+  if (parts.includes("admin")) return "admin";
+  if (parts.includes("dispatcher")) return "dispatcher";
+  if (parts.includes("technician")) return "technician";
+  return "user";
 }
 
 export function can(actor: Actor, action: Action, resource?: Owned): boolean {
