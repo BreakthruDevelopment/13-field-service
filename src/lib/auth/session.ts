@@ -27,10 +27,18 @@ export async function requireUserOrRedirect(): Promise<CurrentUser> {
   return user;
 }
 
-/** For pages: signed-in users without the role go to the dashboard. */
+/** Where each role lands when it opens a page that isn't its own. */
+export function homeFor(role: Role): string {
+  if (role === "admin") return "/admin";
+  if (role === "dispatcher") return "/dashboard";
+  if (role === "technician") return "/tech";
+  return "/waiting";
+}
+
+/** For pages: signed-in users without exactly this role go to their own home. Admin is not a technician. */
 export async function requireRoleOrRedirect(role: Role): Promise<CurrentUser> {
   const user = await requireUserOrRedirect();
-  if (role === "admin" && user.role !== "admin") redirect("/dashboard");
+  if (user.role !== role) redirect(homeFor(user.role));
   return user;
 }
 
@@ -41,8 +49,9 @@ export async function requireUser(): Promise<CurrentUser> {
   return user;
 }
 
+/** Exactly this role (403 otherwise). Admin does not pass `requireRole("technician")`. */
 export async function requireRole(role: Role): Promise<CurrentUser> {
   const user = await requireUser();
-  if (role === "admin" && user.role !== "admin") throw new ForbiddenError();
+  if (user.role !== role) throw new ForbiddenError();
   return user;
 }

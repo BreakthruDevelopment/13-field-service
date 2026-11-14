@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
+import { redirect } from "next/navigation";
 import { type Column, DataList, FilterBar, PageIntro, Panel, StatGrid, StatTile, buttonDanger } from "@/components/ui";
-import { requireUserOrRedirect } from "@/lib/auth/session";
+import { homeFor, requireUserOrRedirect } from "@/lib/auth/session";
 import { listItems } from "@/lib/items";
 import { deleteItemAction } from "./actions";
 import { AddItemForm, SummaryPanel } from "./client";
@@ -20,6 +21,8 @@ const one = (v: string | string[] | undefined) => (Array.isArray(v) ? v[0] : v) 
 
 export default async function DashboardPage({ searchParams }: PageProps<"/dashboard">) {
   const user = await requireUserOrRedirect();
+  // New accounts wait for a role. Technicians work from the phone, not this list.
+  if (user.role === "user" || user.role === "technician") redirect(homeFor(user.role));
   const all = await listItems(user);
 
   const sp = await searchParams;

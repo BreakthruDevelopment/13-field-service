@@ -2,7 +2,7 @@
 
 import { useRouter } from "next/navigation";
 import { useState } from "react";
-import { signOut } from "@/lib/auth/client";
+import { signOutAndWipe } from "@/lib/offline/sign-out";
 import { buttonSecondary } from "./ui/styles";
 
 export function SignOutButton() {
@@ -24,8 +24,9 @@ export function SignOutButton() {
         setPending(true);
         setFailed(false);
         try {
-          const result = await signOut();
-          if (result.error) {
+          const result = await signOutAndWipe();
+          if (result === "cancelled") return;
+          if (result === "failed") {
             setFailed(true);
             return;
           }

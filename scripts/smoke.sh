@@ -22,11 +22,22 @@ for path in / /sign-in; do
 done
 pass "pages render inside the shared shell"
 
-for path in /dashboard /admin; do
+for path in /dashboard /admin /tech /waiting; do
   code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE_URL$path")
   [ "$code" = "307" ] || fail "signed-out $path should redirect (307), got $code"
 done
-pass "signed-out dashboard and admin redirect"
+pass "signed-out dashboard, admin, tech, and waiting redirect"
+
+manifest=$(curl -fsS "$BASE_URL/manifest.webmanifest") || fail "manifest did not load"
+echo "$manifest" | grep -Eq '"start_url"[[:space:]]*:[[:space:]]*"/tech"' || fail "manifest start_url should be /tech: $manifest"
+echo "$manifest" | grep -Eq '"display"[[:space:]]*:[[:space:]]*"standalone"' || fail "manifest display should be standalone: $manifest"
+pass "manifest starts at /tech as a standalone app"
+
+sw_headers=$(curl -s -D - -o /dev/null "$BASE_URL/sw.js") || fail "service worker did not load"
+echo "$sw_headers" | grep -qi 'cache-control:.*no-store' || fail "sw.js should be no-store: $sw_headers"
+sw_body=$(curl -fsS "$BASE_URL/sw.js") || fail "service worker body did not load"
+echo "$sw_body" | grep -q 'pathname.indexOf("/api/")===0) return' || fail "service worker must ignore /api"
+pass "service worker is no-store and does not cache /api"
 
 # Better Auth allows 3 sign-in/sign-up requests per 10 s per IP. Back-to-back runs (smoke right after seeding, or two
 # users in a row) can hit it. On a 429, wait out the window and retry once.
@@ -53,6 +64,29 @@ signup() {
 signup "$JAR_A" "smoke-a-$RUN_ID@example.test"
 signup "$JAR_B" "smoke-b-$RUN_ID@example.test"
 pass "two users signed up"
+
+TECH_HDR="$(mktemp)"
+code=$(curl -s -o /dev/null -D "$TECH_HDR" -w '%{http_code}' -b "$JAR_A" "$BASE_URL/tech")
+[ "$code" = "307" ] || fail "signed-in user on /tech should redirect (307), got $code"
+grep -qi '/waiting' "$TECH_HDR" || fail "signed-in user on /tech should redirect to /waiting: $(cat "$TECH_HDR")"
+rm -f "$TECH_HDR"
+pass "signed-in user is sent from /tech to /waiting"
+
+waiting=$(curl -fsS -b "$JAR_A" "$BASE_URL/waiting") || fail "waiting page did not render"
+echo "$waiting" | grep -q 'An admin needs to give you access' || fail "waiting page is missing the access message"
+pass "waiting page tells a new account an admin must grant access"
+
+code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE_URL/api/my/jobs")
+[ "$code" = "401" ] || fail "anonymous job snapshot should be 401, got $code"
+code=$(curl -s -o /dev/null -w '%{http_code}' -H 'content-type: application/json' -H "origin: $BASE_URL" \
+  -d '{"ops":[]}' "$BASE_URL/api/sync")
+[ "$code" = "401" ] || fail "anonymous sync should be 401, got $code"
+code=$(curl -s -o /dev/null -w '%{http_code}' -b "$JAR_A" "$BASE_URL/api/my/jobs")
+[ "$code" = "403" ] || fail "role user job snapshot should be 403, got $code"
+code=$(curl -s -o /dev/null -w '%{http_code}' -b "$JAR_A" -H 'content-type: application/json' -H "origin: $BASE_URL" \
+  -d '{"ops":[]}' "$BASE_URL/api/sync")
+[ "$code" = "403" ] || fail "role user sync should be 403, got $code"
+pass "job snapshot and sync refuse anonymous and non-technician callers"
 
 code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE_URL/api/items")
 [ "$code" = "401" ] || fail "anonymous list should be 401, got $code"

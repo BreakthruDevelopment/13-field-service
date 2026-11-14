@@ -6,10 +6,12 @@ image that deploys to AWS, Azure, Google Cloud or Oracle Cloud.
 
 ## What this app does
 
-_Each app replaces this section: the customer problem, who uses it, and what the AI feature does._
+Technicians keep the jobs assigned to them on a phone, including at a site with no signal. Notes and
+status changes stay on the device and sync when the connection returns. A check-in records where the
+phone was. Work orders are drafted online and submitted for the office to approve. A new account waits
+until an admin grants technician or dispatcher access.
 
-The template ships an example "items" feature: users manage their own items, admins see everyone's, and
-an AI summary describes the list.
+The template items list is still here as the example ownership feature, with an AI summary of that list.
 
 ## Architecture
 

@@ -13,6 +13,18 @@ const eslintConfig = defineConfig([
     "build/**",
     "next-env.d.ts",
   ]),
+  {
+    rules: {
+      "no-restricted-properties": [
+        "error",
+        {
+          object: "geolocation",
+          property: "watchPosition",
+          message: "Background location is banned. Only getCurrentPosition inside Check in at site.",
+        },
+      ],
+    },
+  },
 ]);
 
 export default eslintConfig;
