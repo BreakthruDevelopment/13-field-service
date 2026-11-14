@@ -1,5 +1,8 @@
 import { sql } from "drizzle-orm";
-import { boolean, check, date, index, integer, jsonb, pgTable, primaryKey, text, timestamp, uniqueIndex, uuid } from "drizzle-orm/pg-core";
+import { boolean, check, date, foreignKey, index, integer, jsonb, numeric, pgTable, primaryKey, serial, text, timestamp, uniqueIndex, uuid } from "drizzle-orm/pg-core";
+
+/** Quote a string list for a SQL `in (...)` check. Values are compile-time constants, never user input. */
+const list = (values: readonly string[]) => sql.raw(values.map((v) => `'${v}'`).join(", "));
 
 // ---------------------------------------------------------------------------
 // Auth tables (shape required by Better Auth with the admin plugin).
@@ -90,14 +93,122 @@ export const item = pgTable(
 );
 
 // ---------------------------------------------------------------------------
+// Field service. The background queue already owns the table name `job`, so a
+// dispatch job is `service_job`. Dispatchers share customers, sites and jobs.
+// ---------------------------------------------------------------------------
+
+export const JOB_PRIORITIES = ["low", "normal", "high", "emergency"] as const;
+export type JobPriority = (typeof JOB_PRIORITIES)[number];
+
+export const SERVICE_JOB_STATUSES = ["unassigned", "scheduled", "en_route", "on_site", "on_hold", "completed", "cancelled"] as const;
+export type ServiceJobStatus = (typeof SERVICE_JOB_STATUSES)[number];
+
+/** Open jobs count toward the schedule cap. Completed and cancelled do not. */
+export const OPEN_SERVICE_JOB_STATUSES = ["unassigned", "scheduled", "en_route", "on_site", "on_hold"] as const;
+
+export const customer = pgTable(
+  "customer",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    createdBy: text("created_by")
+      .notNull()
+      .references(() => user.id, { onDelete: "restrict" }),
+    name: text("name").notNull(),
+    phone: text("phone").notNull().default(""),
+    email: text("email"),
+    notes: text("notes").notNull().default(""),
+    clientOpId: uuid("client_op_id"),
+    version: integer("version").notNull().default(1),
+    createdAt: timestamp("created_at", { withTimezone: true, precision: 3 }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true, precision: 3 }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("customer_created_by_client_op_uidx").on(t.createdBy, t.clientOpId),
+    index("customer_name_idx").on(t.name),
+    check("customer_version_chk", sql`${t.version} >= 1`),
+  ],
+);
+
+export const site = pgTable(
+  "site",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    customerId: uuid("customer_id")
+      .notNull()
+      .references(() => customer.id, { onDelete: "cascade" }),
+    label: text("label").notNull(),
+    address: text("address").notNull(),
+    lat: numeric("lat", { precision: 8, scale: 5 }),
+    lng: numeric("lng", { precision: 8, scale: 5 }),
+    accessNotes: text("access_notes").notNull().default(""),
+    clientOpId: uuid("client_op_id"),
+    version: integer("version").notNull().default(1),
+    createdAt: timestamp("created_at", { withTimezone: true, precision: 3 }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true, precision: 3 }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("site_id_customer_uidx").on(t.id, t.customerId),
+    uniqueIndex("site_customer_client_op_uidx").on(t.customerId, t.clientOpId),
+    index("site_customer_id_idx").on(t.customerId),
+    check("site_version_chk", sql`${t.version} >= 1`),
+    check("site_coords_chk", sql`(${t.lat} is null and ${t.lng} is null) or (${t.lat} is not null and ${t.lng} is not null)`),
+  ],
+);
+
+export const serviceJob = pgTable(
+  "service_job",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    number: serial("number").notNull(),
+    customerId: uuid("customer_id")
+      .notNull()
+      .references(() => customer.id, { onDelete: "cascade" }),
+    siteId: uuid("site_id").notNull(),
+    createdBy: text("created_by")
+      .notNull()
+      .references(() => user.id, { onDelete: "restrict" }),
+    assigneeId: text("assignee_id").references(() => user.id, { onDelete: "set null" }),
+    title: text("title").notNull(),
+    description: text("description").notNull().default(""),
+    priority: text("priority", { enum: JOB_PRIORITIES }).notNull().default("normal"),
+    status: text("status", { enum: SERVICE_JOB_STATUSES }).notNull().default("unassigned"),
+    scheduledStart: timestamp("scheduled_start", { withTimezone: true, precision: 3 }),
+    scheduledEnd: timestamp("scheduled_end", { withTimezone: true, precision: 3 }),
+    version: integer("version").notNull().default(1),
+    statusVersion: integer("status_version").notNull().default(1),
+    clientOpId: uuid("client_op_id"),
+    completedAt: timestamp("completed_at", { withTimezone: true, precision: 3 }),
+    createdAt: timestamp("created_at", { withTimezone: true, precision: 3 }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true, precision: 3 }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("service_job_number_uidx").on(t.number),
+    uniqueIndex("service_job_created_by_client_op_uidx").on(t.createdBy, t.clientOpId),
+    index("service_job_assignee_status_start_idx").on(t.assigneeId, t.status, t.scheduledStart),
+    index("service_job_scheduled_start_idx").on(t.scheduledStart),
+    index("service_job_customer_id_idx").on(t.customerId),
+    foreignKey({
+      columns: [t.siteId, t.customerId],
+      foreignColumns: [site.id, site.customerId],
+      name: "service_job_site_customer_fk",
+    }).onDelete("cascade"),
+    check("service_job_priority_chk", sql`${t.priority} in (${list(JOB_PRIORITIES)})`),
+    check("service_job_status_chk", sql`${t.status} in (${list(SERVICE_JOB_STATUSES)})`),
+    check("service_job_version_chk", sql`${t.version} >= 1 and ${t.statusVersion} >= 1`),
+    check(
+      "service_job_window_chk",
+      sql`((${t.scheduledStart} is null and ${t.scheduledEnd} is null) or (${t.scheduledEnd} > ${t.scheduledStart} and ${t.scheduledEnd} <= ${t.scheduledStart} + interval '12 hours'))`,
+    ),
+  ],
+);
+
+// ---------------------------------------------------------------------------
 // Usage limits (src/lib/usage.ts). Each app lists its own kinds here; changing a list
 // needs a migration, because the CHECK constraints below are part of the schema.
 // ---------------------------------------------------------------------------
 
 export const RATE_KINDS = ["api_write", "ai", "upload"] as const;
 export const DAILY_USAGE_KINDS = ["ai", "demo_load"] as const;
-
-const list = (values: readonly string[]) => sql.raw(values.map((v) => `'${v}'`).join(", "));
 
 /** App-wide daily counters (one row per UTC day and kind) for free-tier caps. */
 export const dailyUsage = pgTable(
@@ -176,3 +287,6 @@ export const job = pgTable(
 export type User = typeof user.$inferSelect;
 export type Item = typeof item.$inferSelect;
 export type Job = typeof job.$inferSelect;
+export type Customer = typeof customer.$inferSelect;
+export type Site = typeof site.$inferSelect;
+export type ServiceJob = typeof serviceJob.$inferSelect;

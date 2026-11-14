@@ -22,11 +22,11 @@ for path in / /sign-in; do
 done
 pass "pages render inside the shared shell"
 
-for path in /dashboard /admin; do
+for path in /dashboard /admin /board /jobs /jobs/new; do
   code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE_URL$path")
   [ "$code" = "307" ] || fail "signed-out $path should redirect (307), got $code"
 done
-pass "signed-out dashboard and admin redirect"
+pass "signed-out dashboard, admin, board and jobs redirect"
 
 # Better Auth allows 3 sign-in/sign-up requests per 10 s per IP. Back-to-back runs (smoke right after seeding, or two
 # users in a row) can hit it. On a 429, wait out the window and retry once.

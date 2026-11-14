@@ -20,6 +20,12 @@ export const roles = {
     user: ["create", "list", "set-role", "ban", "delete", "get", "update"],
     session: ["revoke", "delete"],
   }),
+  /**
+   * Dispatchers and technicians get no Better Auth permissions. Their powers are the app's data functions.
+   * Admin is not a superset of either role.
+   */
+  dispatcher: ac.newRole({ user: [], session: [] }),
+  technician: ac.newRole({ user: [], session: [] }),
   user: ac.newRole({ user: [], session: [] }),
 };
 
