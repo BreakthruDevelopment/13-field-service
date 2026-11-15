@@ -529,6 +529,8 @@ export async function updateWorkOrder(actor: Actor, id: string, input: unknown):
     await assertActorCurrent(tx, actor);
     const job = await lockJob(tx, actor, jobId);
     assertCan(actor, action, "work_order", { assigneeId: job.assigneeId });
+    // A cancelled job's order is frozen: nothing may be edited, submitted, approved or returned on it.
+    if (job.status === "cancelled") throw new WorkOrderError("job_cancelled", "This job was cancelled, so its work order can't be changed.");
 
     const prior = await findOp(tx, actor.id, clientOpId);
     if (prior) {

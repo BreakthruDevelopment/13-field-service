@@ -607,6 +607,32 @@ describe.skipIf(!testDatabaseUrl)("work orders (Postgres)", () => {
       expect(await fail(draft(d1, job.id, { baseVersion: 7 }))).toMatchObject({ status: 409, body: { code: "work_order_locked" } });
     });
 
+    it("a cancelled job's work order is frozen: edit, submit, approve and return are all 409 and change nothing", async () => {
+      const job = await jobWith();
+      const w = (await draft(t1, job.id)).workOrder;
+      const submitted = (await patch(t1, job.id, { op: "submit", version: w.version })).workOrder; // submitted, awaiting a dispatcher
+      const fresh = await jobs.getJob(d1, job.id);
+      await jobs.updateJob(d1, job.id, { op: "cancel", version: fresh.version });
+      const v = submitted.version;
+      const attempts: [TestUser, Record<string, unknown>][] = [
+        [t1, { op: "edit", version: v, summary: "x" }],
+        [d1, { op: "edit", version: v, summary: "x" }],
+        [t1, { op: "submit", version: v }],
+        [d1, { op: "approve", version: v }],
+        [d1, { op: "return", version: v, reason: "no" }],
+      ];
+      for (const [who, body] of attempts) expect(await fail(patch(who, job.id, body))).toMatchObject({ status: 409, body: { code: "job_cancelled" } });
+      expect(await wo.getWorkOrder(d1, job.id)).toEqual(submitted);
+      // A draft-state order is frozen too.
+      const job2 = await jobWith();
+      const w2 = (await draft(t1, job2.id)).workOrder;
+      const f2 = await jobs.getJob(d1, job2.id);
+      await jobs.updateJob(d1, job2.id, { op: "cancel", version: f2.version });
+      expect((await fail(patch(t1, job2.id, { op: "edit", version: w2.version, summary: "x" }))).body.code).toBe("job_cancelled");
+      expect((await fail(patch(t1, job2.id, { op: "submit", version: w2.version }))).body.code).toBe("job_cancelled");
+      expect((await wo.getWorkOrder(t1, job2.id))).toEqual(w2);
+    });
+
     it("submit needs a summary; a missing order is a 404; the order's own fields are bounded and NUL-free", async () => {
       const job = await jobWith();
       expect((await fail(patch(t1, job.id, { op: "submit", version: 1 }))).status).toBe(404);
