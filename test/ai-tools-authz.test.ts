@@ -1,15 +1,16 @@
-// Tool handlers authorize on the server with assertCan(), using the actor they closed over, never anything
-// the model supplied. This is the pattern README "Tool use" tells apps to copy; no database needed.
+// Tool handlers authorize on the server with assertCan() (src/lib/access.ts), using the actor they closed over, never
+// anything the model supplied. This is the pattern README "Tool use" tells apps to copy; no database needed.
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
 import { defineTool } from "@/lib/ai";
 import { type ToolTrace, runToolLoop } from "@/lib/ai/tools";
 import type { AiProvider, ToolStepRequest } from "@/lib/ai/types";
-import { type Actor, assertCan } from "@/lib/auth/rbac";
+import { assertCan } from "@/lib/access";
+import type { Actor } from "@/lib/auth/rbac";
 
-const docs: Record<string, { ownerId: string; title: string }> = {
-  mine: { ownerId: "user-a", title: "My note" },
-  theirs: { ownerId: "user-b", title: "VICTIM-PRIVATE-TITLE" },
+const docs: Record<string, { assigneeId: string; title: string }> = {
+  mine: { assigneeId: "user-a", title: "My note" },
+  theirs: { assigneeId: "user-b", title: "VICTIM-PRIVATE-TITLE" },
 };
 
 /** The factory an app writes: the actor is bound here, per request. */
@@ -24,7 +25,7 @@ function readDocTool(actor: Actor) {
       ctxKeys.push(Object.keys(ctx));
       const doc = docs[id];
       if (!doc) throw new Error("not found");
-      assertCan(actor, "read", { ownerId: doc.ownerId });
+      assertCan(actor, "read", "job", { assigneeId: doc.assigneeId });
       return { title: doc.title };
     },
   });
@@ -55,7 +56,7 @@ async function run(actor: Actor, askFor: string) {
 }
 
 describe("tool authorization", () => {
-  const userA: Actor = { id: "user-a", role: "user" };
+  const userA: Actor = { id: "user-a", role: "technician" };
 
   it("lets the owner read their own document", async () => {
     const r = await run(userA, "mine");

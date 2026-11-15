@@ -1,6 +1,7 @@
 /**
- * Proves admins cannot impersonate users or set their passwords, while the admin
- * features the apps rely on (set-role, ban, remove-user) still work.
+ * Proves admins cannot impersonate users or set their passwords, and that Better Auth's own set-role, create-user,
+ * update-user and remove-user are disabled (roles change only through POST /api/admin/roles; account deletion is out of
+ * scope), while list and ban still work.
  * Runs against a real Postgres when TEST_DATABASE_URL is set.
  * Better Auth's origin check is off under NODE_ENV=test, so requests need no Origin header.
  */
@@ -158,18 +159,36 @@ describe.skipIf(!url)("admin permissions (Better Auth + Postgres)", () => {
 
   it("does not let a plain user use admin endpoints", async () => {
     const res = await call("/admin/set-role", { userId: victimId, role: "admin" }, userCookie);
-    expect(res.status).toBe(403);
+    expect([403, 404]).toContain(res.status);
     const [row] = await sql`select role from "user" where id = ${victimId}`;
     expect(row.role).not.toBe("admin");
   });
 
-  it("still lets an admin promote and demote a user", async () => {
-    let res = await call("/admin/set-role", { userId: victimId, role: "admin" }, adminCookie);
-    expect(res.status).toBe(200);
-    expect((await sql`select role from "user" where id = ${victimId}`)[0].role).toBe("admin");
-    res = await call("/admin/set-role", { userId: victimId, role: "user" }, adminCookie);
-    expect(res.status).toBe(200);
+  it("refuses an admin's set-role over HTTP and by role, so roles change only through POST /api/admin/roles", async () => {
+    for (const role of ["technician", "dispatcher", "admin", "user"]) {
+      const res = await call("/admin/set-role", { userId: victimId, role }, adminCookie);
+      expect([403, 404], role).toContain(res.status);
+    }
+    await expect(
+      authApi.setRole({ headers: new Headers({ cookie: adminCookie }), body: { userId: victimId, role: "dispatcher" } }),
+    ).rejects.toMatchObject({ statusCode: 403 });
     expect((await sql`select role from "user" where id = ${victimId}`)[0].role).toBe("user");
+  });
+
+  it("refuses an admin's create-user and update-user over HTTP and by role, and changes nothing", async () => {
+    let res = await call("/admin/create-user", { name: "Made", email: email("made"), password: PASSWORD, role: "dispatcher" }, adminCookie);
+    expect([403, 404]).toContain(res.status);
+    expect(await sql`select id from "user" where email = ${email("made")}`).toHaveLength(0);
+    res = await call("/admin/update-user", { userId: victimId, data: { name: "Renamed", role: "dispatcher" } }, adminCookie);
+    expect([403, 404]).toContain(res.status);
+    await expect(
+      authApi.createUser({ headers: new Headers({ cookie: adminCookie }), body: { name: "Made", email: email("made"), password: PASSWORD, role: "user" } }),
+    ).rejects.toMatchObject({ statusCode: 403 });
+    await expect(
+      authApi.adminUpdateUser({ headers: new Headers({ cookie: adminCookie }), body: { userId: victimId, data: { name: "Renamed" } } }),
+    ).rejects.toMatchObject({ statusCode: 403 });
+    const [row] = await sql`select name, role from "user" where id = ${victimId}`;
+    expect(row).toMatchObject({ name: "victim", role: "user" });
   });
 
   it("still lets an admin list users, ban and unban", async () => {
@@ -186,9 +205,12 @@ describe.skipIf(!url)("admin permissions (Better Auth + Postgres)", () => {
     expect(res.status).toBe(200);
   });
 
-  it("still lets an admin remove a user", async () => {
+  it("refuses an admin's remove-user over HTTP and by role: nothing deletes accounts", async () => {
     const res = await call("/admin/remove-user", { userId: victimId }, adminCookie);
-    expect(res.status).toBe(200);
-    expect(await sql`select id from "user" where id = ${victimId}`).toHaveLength(0);
+    expect([403, 404]).toContain(res.status);
+    await expect(
+      authApi.removeUser({ headers: new Headers({ cookie: adminCookie }), body: { userId: victimId } }),
+    ).rejects.toMatchObject({ statusCode: 403 });
+    expect(await sql`select id from "user" where id = ${victimId}`).toHaveLength(1);
   });
 });

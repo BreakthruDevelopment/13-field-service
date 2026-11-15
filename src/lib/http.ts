@@ -1,16 +1,21 @@
 import { ZodError } from "zod";
 import { AiError } from "@/lib/ai/types";
 import { ForbiddenError, UnauthorizedError } from "@/lib/auth/rbac";
-import { BadRequestError, HttpError, PayloadTooLargeError } from "@/lib/errors";
+import { BadRequestError, HttpError, PayloadTooLargeError, VersionConflictError } from "@/lib/errors";
 import { log } from "@/lib/log";
 import { safeErrorFields } from "@/lib/safe-error";
 
-export type ErrorInfo = { status: number; body: { error: string; issues?: unknown } };
+export type ErrorInfo = { status: number; body: { error: string; issues?: unknown; current?: unknown; code?: string } };
 
 /** Map known errors to a status and a client-safe body; never leak stack traces or internals. */
 export function errorInfo(err: unknown): ErrorInfo {
+  if (err instanceof VersionConflictError) {
+    return { status: 409, body: { error: err.message, current: err.current } };
+  }
   if (err instanceof UnauthorizedError || err instanceof ForbiddenError || err instanceof HttpError) {
-    return { status: err.status, body: { error: err.message } };
+    // `code` (stable, machine-readable) is set by StatusRuleError: note_required, transition_not_allowed, job_closed.
+    const code = (err as { code?: unknown }).code;
+    return { status: err.status, body: { error: err.message, ...(typeof code === "string" ? { code } : {}) } };
   }
   if (err instanceof ZodError) {
     return {
@@ -21,6 +26,10 @@ export function errorInfo(err: unknown): ErrorInfo {
       },
     };
   }
+  // The database picked this request to lose a lock race (deadlock or serialization failure): nothing was changed.
+  if (dbCode(err) === "40P01" || dbCode(err) === "40001") {
+    return { status: 409, body: { error: "That was busy. Try again.", code: "retry" } };
+  }
   if (err instanceof AiError) {
     const status = err.kind === "input_rejected" ? 400 : err.kind === "quota" ? 429 : 502;
     return { status, body: { error: err.message } };
@@ -28,6 +37,16 @@ export function errorInfo(err: unknown): ErrorInfo {
   // Never log `err.message` here: database errors embed the query parameters (emails, note text, keys).
   log.error("request.failed", safeErrorFields(err));
   return { status: 500, body: { error: "Something went wrong" } };
+}
+
+function dbCode(err: unknown): string | undefined {
+  let current: unknown = err;
+  for (let i = 0; i < 5 && current && typeof current === "object"; i++) {
+    const code = (current as { code?: unknown }).code;
+    if (typeof code === "string") return code;
+    current = (current as { cause?: unknown }).cause;
+  }
+  return undefined;
 }
 
 export function errorResponse(err: unknown): Response {
