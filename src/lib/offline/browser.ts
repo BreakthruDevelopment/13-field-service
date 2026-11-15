@@ -1,0 +1,66 @@
+"use client";
+
+import { signOut } from "@/lib/auth/client";
+import { TechDataEngine, type EngineEnv } from "./engine";
+import { OfflineStore } from "./store";
+import { type SignOutEnv, type SignOutResult, type WipeEnv, finishPendingSignOut as finish, signOutAndWipe as signOutAndWipeWith, wipeLocalData } from "./wipe";
+
+/** The real browser bindings for the framework-free offline core. Only client code imports this file. */
+
+const engines = new Set<TechDataEngine>();
+
+export const haltAllEngines = () => {
+  for (const e of engines) e.halt();
+  engines.clear();
+};
+
+function wipeEnv(): WipeEnv {
+  return {
+    indexedDB: window.indexedDB,
+    caches: "caches" in window ? window.caches : undefined,
+    localStorage: window.localStorage,
+    serviceWorker: "serviceWorker" in navigator ? navigator.serviceWorker : undefined,
+    haltEngines: haltAllEngines,
+  };
+}
+
+function signOutEnv(confirmLoss?: SignOutEnv["confirmLoss"]): SignOutEnv {
+  return { ...wipeEnv(), fetch: window.fetch.bind(window), signOut, isOnline: () => navigator.onLine, confirmLoss };
+}
+
+/** Open (or create) this user's offline database and the engine on it. Any other user's data on this device is deleted first. */
+export async function createBrowserEngine(userId: string): Promise<TechDataEngine> {
+  const store = await OfflineStore.openForUser(userId, { indexedDB: window.indexedDB, localStorage: window.localStorage });
+  const locks = navigator.locks;
+  const env: EngineEnv = {
+    fetch: window.fetch.bind(window),
+    now: Date.now,
+    random: Math.random,
+    newId: () => crypto.randomUUID(),
+    setTimer: (fn, ms) => window.setTimeout(fn, ms),
+    clearTimer: (h) => window.clearTimeout(h as number),
+    withLock: locks
+      ? async <T,>(name: string, fn: () => Promise<T>) => {
+          const out = await locks.request(name, { ifAvailable: true }, async (lock) => (lock ? { ran: true as const, value: await fn() } : { ran: false as const }));
+          return out.ran ? out.value : undefined;
+        }
+      : undefined,
+    wipe: () => wipeLocalData(wipeEnv()),
+    onHalt: (e) => void engines.delete(e),
+  };
+  const engine = new TechDataEngine(store, env);
+  engines.add(engine);
+  return engine;
+}
+
+/** The Sign out button: warns about unsynced changes, wipes this device, signs out, asks the browser to clear site data. */
+export function signOutAndWipe(): Promise<SignOutResult> {
+  return signOutAndWipeWith(
+    signOutEnv((n) => window.confirm(`${n} change${n === 1 ? "" : "s"} not synced will be lost. Sign out anyway?`)),
+  );
+}
+
+/** Run on every page load: finishes a sign-out that was left half done offline. */
+export function finishPendingSignOut(): Promise<boolean> {
+  return finish(signOutEnv());
+}

@@ -1,0 +1,404 @@
+import { backoffMs, retryAfterMs } from "./backoff";
+import {
+  LocalRuleError,
+  cleanNote,
+  isWorkTransition,
+  overlay,
+  transitionNeedsNote,
+} from "./rules";
+import type { OfflineStore } from "./store";
+import type { AttentionItem, CheckInLocation, JobStatus, QueuedOp, Snapshot, StoredSnapshot, SyncResult, SyncStatus, TechJob, WireOp } from "./types";
+
+/**
+ * The offline engine for one technician: the snapshot, the outbox and the flush loop, with no framework in it.
+ * `useTechData()` (`use-tech-data.tsx`) is the React face of it.
+ *
+ * Contracts:
+ * - **Nothing typed is lost.** `addNote` and `setStatus` resolve only after the op is in IndexedDB.
+ * - **One intent, one op id.** The id is minted when the user acts and kept until the server answers (a retry or a double
+ *   tap can't create a second op). A second status op on a job carries `dependsOn: <previous op id>` and the raised base.
+ * - **Ops leave the outbox only on a final answer** (`applied`, `replayed`, `conflict`, `rejected`). A network error, a
+ *   5xx, a 429, a 401 and `deferred` keep them. `conflict` and `rejected` are recorded in "Needs attention" first.
+ * - **The outbox is bound to its user.** Every batch carries `ownerId`; the server refuses (409 `owner_mismatch`) a batch
+ *   from another session user and the engine then wipes everything. A snapshot for a different user does the same.
+ * - **One flush at a time** (a Web Lock across tabs, plus a single-flight promise), batches of at most 50 ops / 60 KB,
+ *   exponential backoff with full jitter (2 s to 5 min, honouring `Retry-After`).
+ */
+
+export const MAX_BATCH_OPS = 50;
+export const MAX_BATCH_BYTES = 60 * 1024;
+export const FLUSH_DEBOUNCE_MS = 2000;
+export const MAX_ROUNDS_PER_FLUSH = 10;
+
+export type EngineEnv = {
+  fetch: typeof fetch;
+  now: () => number;
+  random: () => number;
+  newId: () => string;
+  setTimer: (fn: () => void, ms: number) => unknown;
+  clearTimer: (handle: unknown) => void;
+  /** Run `fn` unless another tab is already flushing for this user (then resolve `undefined`). Defaults to no lock. */
+  withLock?: <T>(name: string, fn: () => Promise<T>) => Promise<T | undefined>;
+  /** Delete every local trace (databases, caches). Called when the session user turns out to be someone else. */
+  wipe: () => Promise<void>;
+  /** Called once when the engine stops (unmount, sign-out, wipe), so a registry can forget it. */
+  onHalt?: (engine: TechDataEngine) => void;
+};
+
+export type EngineState = {
+  ready: boolean;
+  userId: string;
+  jobs: TechJob[];
+  hasSnapshot: boolean;
+  truncated: boolean;
+  snapshotSavedAt: number | null;
+  pending: number;
+  attention: AttentionItem[];
+  status: SyncStatus;
+  lastSyncedAt: number | null;
+  nextRetryAt: number | null;
+};
+
+const initialState = (userId: string): EngineState => ({
+  ready: false,
+  userId,
+  jobs: [],
+  hasSnapshot: false,
+  truncated: false,
+  snapshotSavedAt: null,
+  pending: 0,
+  attention: [],
+  status: "idle",
+  lastSyncedAt: null,
+  nextRetryAt: null,
+});
+
+/** Take ops from the front of the queue up to the op and byte limits (always at least one). */
+export function takeBatch(queue: QueuedOp[], maxOps = MAX_BATCH_OPS, maxBytes = MAX_BATCH_BYTES): QueuedOp[] {
+  const batch: QueuedOp[] = [];
+  let bytes = 0;
+  for (const q of queue) {
+    const size = new TextEncoder().encode(JSON.stringify(q.op)).length + 1;
+    if (batch.length > 0 && (batch.length >= maxOps || bytes + size > maxBytes)) break;
+    batch.push(q);
+    bytes += size;
+  }
+  return batch;
+}
+
+export class TechDataEngine {
+  private state: EngineState;
+  private listeners = new Set<() => void>();
+  private snapshot: StoredSnapshot | null = null;
+  private queue: QueuedOp[] = [];
+  private timer: unknown = null;
+  private attempts = 0;
+  private flushing: Promise<void> | null = null;
+  private halted = false;
+
+  constructor(
+    private readonly store: OfflineStore,
+    private readonly env: EngineEnv,
+  ) {
+    this.state = initialState(store.userId);
+  }
+
+  get userId() {
+    return this.store.userId;
+  }
+
+  // -- external store -------------------------------------------------------------------------------------------------
+
+  subscribe = (listener: () => void) => {
+    this.listeners.add(listener);
+    return () => {
+      this.listeners.delete(listener);
+    };
+  };
+
+  getState = () => this.state;
+
+  private set(patch: Partial<EngineState>) {
+    this.state = { ...this.state, ...patch };
+    for (const l of this.listeners) l();
+  }
+
+  private rebuild(extra: Partial<EngineState> = {}) {
+    this.set({
+      jobs: overlay(this.snapshot?.jobs ?? [], this.queue),
+      hasSnapshot: this.snapshot !== null,
+      truncated: this.snapshot?.truncated ?? false,
+      snapshotSavedAt: this.snapshot?.savedAt ?? null,
+      pending: this.queue.length,
+      ...extra,
+    });
+  }
+
+  // -- lifecycle ------------------------------------------------------------------------------------------------------
+
+  /** Read the saved snapshot, outbox and attention list. Works with no network; call before anything renders data. */
+  async load(): Promise<void> {
+    this.snapshot = await this.store.getSnapshot();
+    this.queue = await this.store.outbox();
+    const attention = await this.store.attention();
+    this.rebuild({ ready: true, attention });
+    if (this.queue.length > 0) this.scheduleFlush(FLUSH_DEBOUNCE_MS);
+  }
+
+  /** Stop all work and release the database. After this the engine does nothing (a wipe may be deleting the database). */
+  halt() {
+    this.halted = true;
+    if (this.timer !== null) this.env.clearTimer(this.timer);
+    this.timer = null;
+    this.store.close();
+    this.set({ status: "wiped", ready: false });
+    this.env.onHalt?.(this);
+  }
+
+  get isHalted() {
+    return this.halted;
+  }
+
+  // -- actions --------------------------------------------------------------------------------------------------------
+
+  private job(jobId: string): TechJob {
+    const job = this.state.jobs.find((j) => j.id === jobId);
+    if (!job) throw new LocalRuleError("no_such_job", "That job isn't on this phone any more.");
+    return job;
+  }
+
+  private async enqueue(op: WireOp, job: TechJob): Promise<string> {
+    const item = { op, label: `#${job.number} ${job.title}`.slice(0, 160), createdAt: this.env.now() };
+    await this.store.enqueue(item);
+    this.queue = await this.store.outbox();
+    this.rebuild();
+    this.scheduleFlush(FLUSH_DEBOUNCE_MS);
+    return op.opId;
+  }
+
+  /** Queue a note. Pass the same `opId` on a retry of the same tap. Resolves with the op id once it is stored. */
+  async addNote(jobId: string, body: string, opId?: string): Promise<string> {
+    const text = cleanNote(body);
+    const job = this.job(jobId);
+    if (job.status === "cancelled") throw new LocalRuleError("job_cancelled", "This job was cancelled.");
+    return this.enqueue({ kind: "note.add", opId: opId ?? this.env.newId(), jobId, clientAt: new Date(this.env.now()).toISOString(), body: text }, job);
+  }
+
+  /**
+   * Queue a status change. `location` is only for `on_site` and only from the explicit "Check in at site" tap.
+   * The base is the job's *local* `statusVersion` (raised by this phone's own queued status ops) and a second op on the
+   * same job depends on the previous one.
+   */
+  async setStatus(jobId: string, to: JobStatus, opts: { location?: CheckInLocation | null; opId?: string } = {}): Promise<string> {
+    const job = this.job(jobId);
+    if (opts.location && to !== "on_site") throw new LocalRuleError("location_only_on_site", "A location can only be sent when checking in on site.");
+    if (!isWorkTransition(job.status, to)) throw new LocalRuleError("transition_not_allowed", `A ${job.status.replace("_", " ")} job can't move to ${to.replace("_", " ")}.`);
+    if (transitionNeedsNote(to) && job.notes.length === 0) throw new LocalRuleError("note_required", "Add a note about the work before you do that.");
+    const previous = [...this.queue].reverse().find((q) => q.op.kind === "status.set" && q.op.jobId === jobId);
+    return this.enqueue(
+      {
+        kind: "status.set",
+        opId: opts.opId ?? this.env.newId(),
+        jobId,
+        clientAt: new Date(this.env.now()).toISOString(),
+        to,
+        baseStatusVersion: job.statusVersion,
+        dependsOn: previous ? previous.op.opId : null,
+        ...(opts.location ? { location: opts.location } : {}),
+      },
+      job,
+    );
+  }
+
+  async dismissAttention(opId: string): Promise<void> {
+    await this.store.dismissAttention(opId);
+    this.set({ attention: await this.store.attention() });
+  }
+
+  // -- network --------------------------------------------------------------------------------------------------------
+
+  scheduleFlush(ms: number) {
+    if (this.halted) return;
+    if (this.timer !== null) this.env.clearTimer(this.timer);
+    this.timer = this.env.setTimer(() => {
+      this.timer = null;
+      void this.flush().catch(() => undefined);
+    }, ms);
+  }
+
+  /** Send the outbox. Safe to call any time; one flush runs at a time. `force` retries even after a 401 or 403. */
+  flush(opts: { force?: boolean } = {}): Promise<void> {
+    if (this.halted) return Promise.resolve();
+    if (!opts.force && (this.state.status === "signed_out" || this.state.status === "forbidden")) return Promise.resolve();
+    if (this.flushing) return this.flushing;
+    const run = async () => {
+      try {
+        const lock = this.env.withLock;
+        if (lock) await lock(`fsd-flush-${this.userId}`, () => this.flushLocked());
+        else await this.flushLocked();
+      } catch (err) {
+        // A wipe closes the database under a running flush: that is expected. Anything else (IndexedDB failing) is a
+        // retryable fault, never an unhandled rejection that leaves the outbox unsent.
+        if (!this.halted) this.backoff();
+        else void err;
+      } finally {
+        this.flushing = null;
+      }
+    };
+    this.flushing = run();
+    return this.flushing;
+  }
+
+  private backoff(retryAfter: number | null = null) {
+    this.attempts += 1;
+    const wait = Math.max(backoffMs(this.attempts - 1, this.env.random), retryAfter ?? 0);
+    this.set({ status: "backoff", nextRetryAt: this.env.now() + wait });
+    this.scheduleFlush(wait);
+  }
+
+  private async ownerChanged() {
+    this.halt();
+    await this.env.wipe();
+  }
+
+  private async flushLocked(): Promise<void> {
+    let singleOp = false;
+    let finalAnswers = 0;
+    for (let round = 0; round < MAX_ROUNDS_PER_FLUSH && !this.halted; round++) {
+      this.queue = await this.store.outbox();
+      if (this.queue.length === 0) break;
+      const batch = takeBatch(this.queue, singleOp ? 1 : MAX_BATCH_OPS);
+      this.set({ status: "syncing" });
+      let res: Response;
+      try {
+        res = await this.env.fetch("/api/sync", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          credentials: "same-origin",
+          cache: "no-store",
+          body: JSON.stringify({ ownerId: this.userId, ops: batch.map((q) => q.op) }),
+        });
+      } catch {
+        this.backoff();
+        return;
+      }
+      if (this.halted) return;
+
+      if (res.status === 401) {
+        this.set({ status: "signed_out" });
+        return;
+      }
+      if (res.status === 403) {
+        this.set({ status: "forbidden" });
+        return;
+      }
+      if (res.status === 429) {
+        this.backoff(retryAfterMs(res.headers.get("retry-after")));
+        return;
+      }
+      if (res.status === 409) {
+        const body = (await res.json().catch(() => ({}))) as { code?: string };
+        if (body.code === "owner_mismatch") {
+          await this.ownerChanged();
+          return;
+        }
+        this.backoff(); // "retry": the database picked this request to lose a lock race
+        return;
+      }
+      if (res.status === 400 || res.status === 413) {
+        if (batch.length > 1) {
+          singleOp = true; // find the offender: one op per request
+          continue;
+        }
+        // One op the server will never accept: keep what was typed where the technician can see it, and move on.
+        const q = batch[0];
+        await this.store.settle([q.op.opId], [{ opId: q.op.opId, op: q.op, label: q.label, outcome: "rejected", code: "invalid_op", at: this.env.now() }]);
+        finalAnswers++;
+        this.rebuild({ attention: await this.store.attention() });
+        continue;
+      }
+      if (!res.ok) {
+        this.backoff();
+        return;
+      }
+
+      let body: { results?: SyncResult[] };
+      try {
+        body = (await res.json()) as { results?: SyncResult[] };
+      } catch {
+        this.backoff();
+        return;
+      }
+      const results = new Map((body.results ?? []).map((r) => [r.opId, r]));
+      const done: string[] = [];
+      const attention: AttentionItem[] = [];
+      let deferred = 0;
+      for (const q of batch) {
+        const r = results.get(q.op.opId);
+        if (!r || r.outcome === "deferred") {
+          deferred++;
+          continue;
+        }
+        done.push(q.op.opId);
+        if (r.outcome === "conflict" || r.outcome === "rejected") {
+          attention.push({ opId: q.op.opId, op: q.op, label: q.label, outcome: r.outcome, code: r.code ?? "unknown", job: r.job, at: this.env.now() });
+        }
+      }
+      await this.store.settle(done, attention);
+      finalAnswers += done.length;
+      this.queue = await this.store.outbox();
+      this.attempts = 0;
+      this.rebuild({ attention: await this.store.attention(), lastSyncedAt: this.env.now(), nextRetryAt: null, status: "idle" });
+      if (deferred > 0 && done.length === 0) {
+        this.backoff(); // the server made no progress (time budget or a busy job): wait, don't hammer
+        return;
+      }
+    }
+    if (finalAnswers > 0 && !this.halted) {
+      // The server's state moved: take it back so statusVersion and notes catch up with what was applied.
+      await this.refresh();
+    }
+    if (this.halted) return;
+    if (this.state.status === "syncing") this.set({ status: "idle" });
+    // More than one flush's worth was waiting: carry on shortly (a backoff, a 401 or a halt has already decided otherwise).
+    this.queue = await this.store.outbox();
+    if (this.queue.length > 0 && this.state.status === "idle") this.scheduleFlush(FLUSH_DEBOUNCE_MS);
+  }
+
+  /** Fetch `/api/my/jobs` (conditional on the saved ETag) and keep it. Offline or failing: keep what's saved. */
+  async refresh(): Promise<void> {
+    if (this.halted) return;
+    const headers: Record<string, string> = { accept: "application/json" };
+    if (this.snapshot?.etag) headers["if-none-match"] = this.snapshot.etag;
+    let res: Response;
+    try {
+      res = await this.env.fetch("/api/my/jobs", { headers, credentials: "same-origin", cache: "no-store" });
+    } catch {
+      return;
+    }
+    if (this.halted) return;
+    if (res.status === 401) return void this.set({ status: "signed_out" });
+    if (res.status === 403) return void this.set({ status: "forbidden" });
+    if (res.status === 304 && this.snapshot) {
+      this.snapshot = { ...this.snapshot, savedAt: this.env.now() };
+      await this.store.putSnapshot(this.snapshot);
+      this.rebuild();
+      return;
+    }
+    if (!res.ok) return;
+    let body: Snapshot;
+    try {
+      body = (await res.json()) as Snapshot;
+    } catch {
+      return;
+    }
+    if (typeof body?.userId !== "string" || !Array.isArray(body.jobs)) return;
+    if (body.userId !== this.userId) {
+      await this.ownerChanged();
+      return;
+    }
+    this.snapshot = { ...body, savedAt: this.env.now(), etag: res.headers.get("etag") };
+    await this.store.putSnapshot(this.snapshot);
+    this.rebuild();
+  }
+}

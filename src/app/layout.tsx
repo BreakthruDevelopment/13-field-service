@@ -1,6 +1,7 @@
 import type { Metadata, Viewport } from "next";
 import localFont from "next/font/local";
 import { AppShell } from "@/components/app-shell";
+import { PendingSignOut } from "@/components/service-worker-register";
 import { APP_DESCRIPTION, APP_TITLE } from "@/lib/app-config";
 import "./globals.css";
 
@@ -45,6 +46,7 @@ export default function RootLayout({ children }: LayoutProps<"/">) {
       className={`${newsreader.variable} ${publicSans.variable} ${plexMono.variable} h-full antialiased`}
     >
       <body className="flex min-h-full flex-col">
+        <PendingSignOut />
         <AppShell>{children}</AppShell>
       </body>
     </html>

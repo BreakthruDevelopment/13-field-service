@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # End-to-end smoke test against a running app (local, CI, or a deployed URL): roles, idempotent writes, version
-# conflicts, technician isolation and the admin role grant, over HTTP. Needs curl and jq.
+# conflicts, technician isolation, the offline sync and the admin role grant, over HTTP. Needs curl and jq.
 #
 #   Local and CI:  DATABASE_URL=... BASE_URL=http://localhost:3000 ./scripts/smoke.sh
 #     Signs up a dispatcher, two technicians, a new user and an admin, and gives them their roles with psql.
@@ -36,6 +36,19 @@ for path in /dashboard /admin; do
   [ "$code" = "307" ] || fail "signed-out $path should redirect (307), got $code"
 done
 pass "signed-out dashboard and admin redirect"
+
+# The installable offline app (13.2): the worker is never cached, the manifest opens /tech, location is ours alone.
+sw_headers=$(curl -fsS -D - -o "$TMP/sw.js" "$BASE_URL/sw.js" | tr -d '\r') || fail "/sw.js is unreachable"
+echo "$sw_headers" | grep -iq '^cache-control:.*no-store' || fail "/sw.js must be served with Cache-Control: no-store: $sw_headers"
+grep -q '/api/' "$TMP/sw.js" && grep -q 'fsd-' "$TMP/sw.js" || fail "/sw.js does not look like the service worker"
+manifest=$(curl -fsS "$BASE_URL/manifest.webmanifest") || fail "manifest unreachable"
+[ "$(echo "$manifest" | jq -r '.start_url + " " + .scope + " " + .display')" = "/tech /tech standalone" ] || fail "manifest should open /tech standalone: $manifest"
+curl -fsS -D - -o /dev/null "$BASE_URL/" | tr -d '\r' | grep -iq '^permissions-policy:.*geolocation=(self)' || fail "Permissions-Policy should allow geolocation for this origin only"
+code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE_URL/tech")
+[ "$code" = "307" ] || fail "signed-out /tech should redirect (307), got $code"
+clear_headers=$(curl -s -D - -o /dev/null -X POST -H "origin: $BASE_URL" "$BASE_URL/api/session/clear" | tr -d '\r')
+echo "$clear_headers" | grep -iq '^clear-site-data: "cache", "storage"' || fail "/api/session/clear should answer Clear-Site-Data: $clear_headers"
+pass "service worker is no-store, manifest opens /tech, geolocation is self-only, /api/session/clear sends Clear-Site-Data"
 
 # --- helpers -----------------------------------------------------------------------------------------------------
 
@@ -186,6 +199,77 @@ api "$JAR_T1" POST "/api/jobs/$JOB/notes" '{"body":"Replaced the cartridge.","op
 api "$JAR_T1" POST "/api/jobs/$JOB/notes" '{"body":"Replaced the cartridge.","opId":"'"$OP_J"'"}'; want 200 "replayed technician note"
 [ "$(jqr '.job.notes | length')" = "1" ] || fail "a replayed note op id must leave one note: $BODY"
 pass "a replayed note op id left one note"
+
+# --- offline sync (13.2): snapshot, batched ops, replay, ownership, conflicts ---------------------------------------
+
+OP_SJ=$(uuid)
+api "$JAR_D" POST /api/jobs '{"customerId":"'"$CUSTOMER"'","siteId":"'"$SITE"'","title":"Smoke sync job '"$RUN_ID"'","assigneeId":"'"$ID_T1"'","scheduledStart":"'"$(hours_ahead 6)"'","scheduledEnd":"'"$(hours_ahead 7)"'","clientOpId":"'"$OP_SJ"'"}'; want 201 "create the sync job"
+SJOB=$(jqr .job.id); SSV=$(jqr .job.statusVersion)
+
+api "" POST /api/sync '{"ownerId":"x","ops":[]}'; want 401 "anonymous sync"
+api "$JAR_N" POST /api/sync '{"ownerId":"'"$ID_N"'","ops":[]}'; want 403 "new user syncing"
+api "$JAR_D" POST /api/sync '{"ownerId":"x","ops":[]}'; want 403 "dispatcher syncing"
+api "$JAR_D" GET /api/my/jobs; want 403 "dispatcher reading a technician snapshot"
+api "" GET /api/my/jobs; want 401 "anonymous snapshot"
+
+api "$JAR_T1" GET /api/my/jobs; want 200 "technician 1 snapshot"
+jq -e --arg id "$SJOB" --arg me "$ID_T1" '.userId == $me and (.jobs | map(.id) | index($id) != null)' <<<"$BODY" >/dev/null || fail "the snapshot should be technician 1's and hold the sync job: $BODY"
+echo "$BODY" | grep -q 'smoke@example.test' && fail "the snapshot must not carry the customer's email"
+jq -e --arg id "$SJOB" '.jobs[] | select(.id == $id) | .customer.phone == "555-0100" and .site.accessNotes == "Side door"' <<<"$BODY" >/dev/null || fail "the snapshot should carry phone and access notes: $BODY"
+ETAG=$(curl -s -D - -o /dev/null -b "$JAR_T1" "$BASE_URL/api/my/jobs" | tr -d '\r' | awk 'tolower($1)=="etag:" {print $2}')
+[ -n "$ETAG" ] || fail "the snapshot should send an ETag"
+code=$(curl -s -o /dev/null -w '%{http_code}' -b "$JAR_T1" -H "if-none-match: $ETAG" "$BASE_URL/api/my/jobs")
+[ "$code" = "304" ] || fail "an unchanged snapshot should answer 304, got $code"
+if [ "$HAVE_T2" = 1 ]; then
+  api "$JAR_T2" GET /api/my/jobs; want 200 "technician 2 snapshot"
+  jq -e --arg id "$SJOB" '.jobs | map(.id) | index($id) == null' <<<"$BODY" >/dev/null || fail "technician 2's snapshot must not hold technician 1's job"
+fi
+pass "snapshot: technician 1 gets their job (phone, access notes, no email), unchanged is a 304, others get 401/403"
+
+OP_N=$(uuid); OP_S1=$(uuid); OP_S2=$(uuid); NOW=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+SYNC_BODY='{"ownerId":"'"$ID_T1"'","deviceId":"smoke","ops":['\
+'{"kind":"note.add","opId":"'"$OP_N"'","jobId":"'"$SJOB"'","clientAt":"'"$NOW"'","body":"Offline note: replaced the cartridge."},'\
+'{"kind":"status.set","opId":"'"$OP_S1"'","jobId":"'"$SJOB"'","clientAt":"'"$NOW"'","to":"en_route","baseStatusVersion":'"$SSV"',"dependsOn":null}]}'
+api "$JAR_T1" POST /api/sync "$SYNC_BODY"; want 200 "first sync"
+[ "$(jqr '[.results[].outcome] | join(",")')" = "applied,applied" ] || fail "both ops should apply: $BODY"
+api "$JAR_T1" POST /api/sync "$SYNC_BODY"; want 200 "replayed sync"
+[ "$(jqr '[.results[].outcome] | join(",")')" = "replayed,replayed" ] || fail "a replayed batch should answer replayed: $BODY"
+api "$JAR_T1" GET "/api/jobs/$SJOB"; want 200 "reading the synced job"
+[ "$(jqr '.job.notes | length')" = "1" ] && [ "$(jqr .job.status)" = "en_route" ] || fail "a replayed batch must leave one note and en_route: $BODY"
+pass "sync: a batch applies once and its replay returns 'replayed' without a second note"
+
+SYNC_REUSE='{"ownerId":"'"$ID_T1"'","ops":[{"kind":"note.add","opId":"'"$OP_N"'","jobId":"'"$SJOB"'","clientAt":"'"$NOW"'","body":"A different note with a used op id"}]}'
+api "$JAR_T1" POST /api/sync "$SYNC_REUSE"; want 200 "reused op id"
+[ "$(jqr '.results[0].code')" = "op_id_reused" ] || fail "an op id reused with another payload should be refused: $BODY"
+api "$JAR_T1" POST /api/sync '{"ownerId":"'"$ID_N"'","ops":[{"kind":"note.add","opId":"'"$(uuid)"'","jobId":"'"$SJOB"'","clientAt":"'"$NOW"'","body":"wrong owner"}]}'; want 409 "a device holding another account's data"
+[ "$(jqr .code)" = "owner_mismatch" ] || fail "should be owner_mismatch: $BODY"
+api "$JAR_T1" POST /api/sync '{"ownerId":"'"$ID_T1"'","ops":[{"kind":"note.add","opId":"'"$(uuid)"'","jobId":"'"$SJOB"'","clientAt":"'"$NOW"'","body":"nul\u0000byte"}]}'; want 400 "NUL byte in a synced note"
+code=$(curl -s -o /dev/null -w '%{http_code}' -b "$JAR_T1" -H 'content-type: application/json' -H 'origin: https://evil.example' -d "$SYNC_BODY" "$BASE_URL/api/sync")
+[ "$code" = "403" ] || fail "cross-origin sync should be 403, got $code"
+code=$(head -c 70000 /dev/zero | tr '\0' 'x' | curl -s -o /dev/null -w '%{http_code}' -b "$JAR_T1" -H 'content-type: application/json' -H "origin: $BASE_URL" --data-binary @- "$BASE_URL/api/sync")
+[ "$code" = "413" ] || fail "an oversized sync body should be 413, got $code"
+if [ "$HAVE_T2" = 1 ]; then
+  api "$JAR_T2" POST /api/sync '{"ownerId":"'"$ID_T2"'","ops":[{"kind":"note.add","opId":"'"$(uuid)"'","jobId":"'"$SJOB"'","clientAt":"'"$NOW"'","body":"not mine"}]}'; want 200 "technician 2 syncing a note on technician 1's job"
+  [ "$(jqr '.results[0].code')" = "not_assigned" ] || fail "another technician's job should be not_assigned: $BODY"
+fi
+pass "sync refusals: reused op id, wrong owner (409), NUL (400), cross-origin (403), oversized (413), someone else's job"
+
+# The office reschedules: the technician's next status still applies. Then the office takes the job back: their queued ops don't.
+api "$JAR_D" GET "/api/jobs/$SJOB"; want 200 "dispatcher reading the sync job"; V=$(jqr .job.version)
+api "$JAR_D" PATCH "/api/jobs/$SJOB" '{"op":"reschedule","version":'"$V"',"scheduledStart":"'"$(hours_ahead 8)"'","scheduledEnd":"'"$(hours_ahead 9)"'"}'; want 200 "reschedule the sync job"
+OP_S3=$(uuid); OP_S4=$(uuid); OP_N2=$(uuid)
+api "$JAR_T1" POST /api/sync '{"ownerId":"'"$ID_T1"'","ops":[{"kind":"status.set","opId":"'"$OP_S2"'","jobId":"'"$SJOB"'","clientAt":"'"$NOW"'","to":"on_site","baseStatusVersion":'"$((SSV + 1))"',"dependsOn":"'"$OP_S1"'","location":{"lat":30.26721999,"lng":-97.74309999,"accuracyM":24.6,"capturedAt":"'"$NOW"'"}}]}'; want 200 "on site after a reschedule"
+[ "$(jqr '.results[0].outcome')" = "applied" ] || fail "a reschedule must not stop the technician's next status: $BODY"
+api "$JAR_D" GET "/api/jobs/$SJOB"; want 200 "dispatcher reading the check-in"; V=$(jqr .job.version)
+[ "$(jqr '.job.events[] | select(.toStatus == "on_site") | .checkIn.lat')" = "30.2672" ] || fail "the check-in should be stored to 4 decimals: $BODY"
+api "$JAR_D" PATCH "/api/jobs/$SJOB" '{"op":"unassign","version":'"$V"'}'; want 200 "the office takes the job back"
+api "$JAR_T1" POST /api/sync '{"ownerId":"'"$ID_T1"'","ops":[{"kind":"note.add","opId":"'"$OP_N2"'","jobId":"'"$SJOB"'","clientAt":"'"$NOW"'","body":"typed after the job was taken back"},{"kind":"status.set","opId":"'"$OP_S3"'","jobId":"'"$SJOB"'","clientAt":"'"$NOW"'","to":"on_hold","baseStatusVersion":'"$((SSV + 2))"',"dependsOn":"'"$OP_S2"'"}]}'; want 200 "ops after reassignment"
+[ "$(jqr '[.results[] | .outcome + ":" + .code] | join(",")')" = "rejected:not_assigned,conflict:not_assigned" ] || fail "after the job was taken back a note is rejected and a status is a conflict: $BODY"
+api "$JAR_T1" GET "/api/jobs/$SJOB"; want 404 "technician 1 reading the job they lost"
+api "$JAR_D" GET "/api/jobs/$SJOB"; want 200 "dispatcher reading the sync job"; V=$(jqr .job.version)
+[ "$(jqr '.job.notes | length')" = "1" ] || fail "the refused note must not be stored: $BODY"
+api "$JAR_D" PATCH "/api/jobs/$SJOB" '{"op":"cancel","version":'"$V"'}'; want 200 "cancel the sync job"
+pass "sync conflicts: a reschedule keeps the next status valid; after the office takes the job back a note is rejected and a status is a conflict"
 
 # --- AI work order (13.3): draft, replay, isolation, submit, approve ---------------------------------------------
 

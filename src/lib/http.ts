@@ -54,6 +54,13 @@ export function errorResponse(err: unknown): Response {
   return Response.json(body, { status });
 }
 
+/** Error responses from the offline routes: a 429 says when to come back (the client adds jitter), and nothing is cached. */
+export function withRetryAfter(res: Response): Response {
+  if (res.status === 429) res.headers.set("retry-after", "120");
+  res.headers.set("cache-control", "no-store");
+  return res;
+}
+
 /** Default cap for JSON bodies: small forms and upload requests. Pass a bigger `limit` per route if you need it. */
 export const JSON_BODY_LIMIT = 16 * 1024;
 
