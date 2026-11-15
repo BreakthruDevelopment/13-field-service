@@ -11,7 +11,7 @@ import { ACTIVE_STATUSES } from "@/lib/job-status";
 import { log } from "@/lib/log";
 import { idText, text } from "@/lib/text";
 import { consumeRate, dailyCount, reserveDaily } from "@/lib/usage";
-import { writeTx } from "@/lib/write-tx";
+import { spendRead, writeTx } from "@/lib/write-tx";
 
 /**
  * Admin: counts, the user directory and role grants. Nothing here reads a job, customer, note or location.
@@ -30,6 +30,7 @@ export type AdminStats = {
 
 export async function getAdminStats(actor: Actor): Promise<AdminStats> {
   assertCan(actor, "read", "stats");
+  await spendRead(actor);
   const { serviceJob, user, syncOp } = schema;
   const jobRows = await db().select({ status: serviceJob.status, n: count() }).from(serviceJob).groupBy(serviceJob.status);
   const userRows = await db().select({ role: user.role, n: count() }).from(user).groupBy(user.role);
@@ -60,6 +61,7 @@ const escapeLike = (s: string) => s.replace(/[\\%_]/g, (c) => `\\${c}`);
 /** Name, email and role of accounts, for the admin's role screen. No sessions, tokens or activity. */
 export async function listUsers(actor: Actor, input: unknown): Promise<{ users: DirectoryUser[] }> {
   assertCan(actor, "read", "user_directory");
+  await spendRead(actor);
   const f = userListQuery.parse(input ?? {});
   const like = f.q ? `%${escapeLike(f.q)}%` : undefined;
   const rows = await db()

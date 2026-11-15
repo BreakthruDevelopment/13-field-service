@@ -17,8 +17,8 @@ import {
 } from "@/lib/job-status";
 import { clampClientAt, distanceM, locationInput, normalizeLocation } from "@/lib/location";
 import { idText, text } from "@/lib/text";
-import type { Tx } from "@/lib/usage";
-import { writeTx } from "@/lib/write-tx";
+import { advisoryLock, type Tx } from "@/lib/usage";
+import { spendRead, writeTx } from "@/lib/write-tx";
 
 /**
  * Jobs: the dispatcher's data layer and the status rules the technician sync (13.2) reuses.
@@ -32,6 +32,8 @@ import { writeTx } from "@/lib/write-tx";
 type Q = Db | Tx;
 
 export const MAX_OPEN_JOBS = 2000;
+/** The live cap. A mutable holder only so tests can lower it for their own process; production never changes it. */
+export const jobLimits = { maxOpen: MAX_OPEN_JOBS };
 export const MAX_NOTES_PER_JOB = 200;
 export const BOARD_LIMIT = 200;
 export const MAX_EVENTS_SHOWN = 500;
@@ -335,6 +337,7 @@ const escapeLike = (s: string) => s.replace(/[\\%_]/g, (c) => `\\${c}`);
 /** Dispatchers: all jobs (filterable). Technicians: only their own. `hasMore` means another page exists. */
 export async function listJobs(actor: Actor, input: unknown): Promise<{ jobs: JobSummary[]; hasMore: boolean }> {
   assertCan(actor, "read", "job");
+  await spendRead(actor);
   const f = jobListQuery.parse(input ?? {});
   const filters: (SQL | undefined)[] = [jobScope(actor)];
   if (f.status) filters.push(eq(serviceJob.status, f.status));
@@ -352,6 +355,7 @@ export async function listJobs(actor: Actor, input: unknown): Promise<{ jobs: Jo
 
 export async function getJob(actor: Actor, id: string): Promise<JobDetail> {
   assertCan(actor, "read", "job");
+  await spendRead(actor);
   return loadJobDetail(db(), actor, uuid.parse(id));
 }
 
@@ -410,6 +414,13 @@ export async function lockJob(tx: Tx, actor: Actor, id: string) {
 
 type JobRow = typeof serviceJob.$inferSelect;
 
+/** The open-jobs cap, checked under one advisory lock so two creates (or a create and a reopen) can't both take the last slot. */
+async function requireOpenCapacity(tx: Tx): Promise<void> {
+  await advisoryLock(tx, "service_job:open_cap");
+  const [{ n }] = await tx.select({ n: count() }).from(serviceJob).where(inArray(serviceJob.status, [...OPEN_STATUSES]));
+  if (n >= jobLimits.maxOpen) throw new ConflictError("Too many open jobs. Complete or cancel some first.");
+}
+
 export async function createJob(actor: Actor, input: unknown): Promise<{ job: JobDetail; created: boolean }> {
   assertCan(actor, "create", "job");
   const data = newJobInput.parse(input);
@@ -427,8 +438,7 @@ export async function createJob(actor: Actor, input: unknown): Promise<{ job: Jo
       .where(and(eq(site.id, data.siteId), eq(site.customerId, data.customerId)));
     if (!site_) throw new NotFoundError("Customer or site not found");
     if (data.assigneeId) await requireTechnician(tx, data.assigneeId);
-    const [{ n }] = await tx.select({ n: count() }).from(serviceJob).where(inArray(serviceJob.status, [...OPEN_STATUSES]));
-    if (n >= MAX_OPEN_JOBS) throw new ConflictError("Too many open jobs. Complete or cancel some first.");
+    await requireOpenCapacity(tx);
 
     const status: JobStatus = data.assigneeId ? "scheduled" : "unassigned";
     const [row] = await tx
@@ -559,6 +569,8 @@ export async function updateJob(actor: Actor, id: string, input: unknown): Promi
       }
       case "reopen": {
         if (job.status !== "completed" && job.status !== "on_hold") throw new ConflictError("Only a completed or on-hold job can be reopened.");
+        // A completed job becomes open again, so it counts against the same cap createJob enforces.
+        if (job.status === "completed") await requireOpenCapacity(tx);
         // The technician may have lost the role since: then the job goes back to the tray instead of to someone who can't see it.
         if (job.assigneeId && (await isTechnician(tx, job.assigneeId))) {
           await set({ status: "scheduled", completedAt: null, statusVersion: job.statusVersion + 1 });

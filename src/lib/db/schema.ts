@@ -375,7 +375,7 @@ export const workOrderLine = pgTable(
 // needs a migration, because the CHECK constraints below are part of the schema.
 // ---------------------------------------------------------------------------
 
-export const RATE_KINDS = ["api_write", "sync", "snapshot", "ai", "demo_load"] as const;
+export const RATE_KINDS = ["api_write", "sync", "snapshot", "ai", "demo_load", "read"] as const;
 export const DAILY_USAGE_KINDS = ["ai", "demo_load"] as const;
 
 /** App-wide daily counters (one row per UTC day and kind) for free-tier caps. */
@@ -409,6 +409,12 @@ export const rateEvent = pgTable(
     check("rate_event_kind_chk", sql`${t.kind} in (${list(RATE_KINDS)})`),
   ],
 );
+
+/** One row per housekeeping task: `ran_at` is the last claim, so the work runs at most once per interval across all instances. */
+export const maintenanceRun = pgTable("maintenance_run", {
+  name: text("name").primaryKey(),
+  ranAt: timestamp("ran_at", { withTimezone: true, precision: 3 }).notNull().defaultNow(),
+});
 
 export const JOB_STATUSES = ["queued", "running", "done", "failed"] as const;
 

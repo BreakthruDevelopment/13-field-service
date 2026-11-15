@@ -5,6 +5,7 @@ import { assertCan } from "@/lib/access";
 import { type Actor, toRole } from "@/lib/auth/rbac";
 import { db, schema } from "@/lib/db";
 import { BadRequestError } from "@/lib/errors";
+import { spendRead } from "@/lib/write-tx";
 import { runMaintenance } from "@/lib/maintenance";
 import { BOARD_LIMIT, type JobSummary, selectSummaries } from "@/lib/service-jobs";
 
@@ -59,11 +60,13 @@ async function activeTechnicians(): Promise<TechnicianDto[]> {
 /** GET /api/technicians: active technicians (id and name), for the assignee picker. Dispatchers only. */
 export async function listTechnicians(actor: Actor): Promise<{ technicians: TechnicianDto[] }> {
   assertCan(actor, "read", "board");
+  await spendRead(actor);
   return { technicians: await activeTechnicians() };
 }
 
 export async function getBoard(actor: Actor, input: unknown): Promise<Board> {
   assertCan(actor, "read", "board");
+  await spendRead(actor);
   const q = boardQuery.parse(input ?? {});
   if (!validTimeZone(q.tz) || !(await knownTimeZone(q.tz)) || Number.isNaN(Date.parse(`${q.date}T00:00:00Z`)) || new Date(`${q.date}T00:00:00Z`).toISOString().slice(0, 10) !== q.date) {
     throw new BadRequestError("Invalid date or time zone");

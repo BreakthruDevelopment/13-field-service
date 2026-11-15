@@ -8,7 +8,7 @@ import { NotFoundError, VersionConflictError } from "@/lib/errors";
 import { type JobSummary, selectSummaries } from "@/lib/service-jobs";
 import { text } from "@/lib/text";
 import type { Tx } from "@/lib/usage";
-import { writeTx } from "@/lib/write-tx";
+import { spendRead, writeTx } from "@/lib/write-tx";
 
 /**
  * Customers and their sites: dispatchers only (any dispatcher sees every customer). Technicians reach a customer's name
@@ -108,6 +108,7 @@ const escapeLike = (s: string) => s.replace(/[\\%_]/g, (c) => `\\${c}`);
 
 export async function listCustomers(actor: Actor, input: unknown): Promise<{ customers: (CustomerDto & { siteCount: number })[]; hasMore: boolean }> {
   assertCan(actor, "read", "customer");
+  await spendRead(actor);
   const f = customerListQuery.parse(input ?? {});
   const like = f.q ? `%${escapeLike(f.q)}%` : undefined;
   const rows = await db()
@@ -122,6 +123,7 @@ export async function listCustomers(actor: Actor, input: unknown): Promise<{ cus
 
 export async function getCustomer(actor: Actor, id: string): Promise<{ customer: CustomerDto; sites: SiteDto[]; jobs: JobSummary[] }> {
   assertCan(actor, "read", "customer");
+  await spendRead(actor);
   const customerId = uuid.parse(id);
   const [row] = await db().select().from(customer).where(eq(customer.id, customerId));
   if (!row) throw new NotFoundError("Customer not found");

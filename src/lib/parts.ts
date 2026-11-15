@@ -6,7 +6,7 @@ import type { Actor } from "@/lib/auth/rbac";
 import { db, schema } from "@/lib/db";
 import { ConflictError, NotFoundError, VersionConflictError } from "@/lib/errors";
 import { text } from "@/lib/text";
-import { writeTx } from "@/lib/write-tx";
+import { spendRead, writeTx } from "@/lib/write-tx";
 
 /**
  * The parts catalog. Dispatchers write; technicians and dispatchers read (technicians see active parts only).
@@ -90,6 +90,7 @@ const haystack = sql`(${part.sku} || ' ' || ${part.name} || ' ' || fs_part_searc
 
 export async function listParts(actor: Actor, input: unknown): Promise<{ parts: PartDto[]; hasMore: boolean }> {
   assertCan(actor, "read", "part");
+  await spendRead(actor);
   const f = partListQuery.parse(input ?? {});
   const filters: (SQL | undefined)[] = [];
   if (actor.role !== "dispatcher" || !f.includeInactive) filters.push(eq(part.active, true));

@@ -35,13 +35,29 @@ export async function pruneSyncOps(): Promise<number> {
   return rows.length;
 }
 
-/** The lazy hook board loads call. Never throws: housekeeping must not break the page. */
-export async function runMaintenance(): Promise<void> {
+/** The purge runs at most once per this long across all instances. */
+export const MAINTENANCE_INTERVAL_MINUTES = 10;
+
+/**
+ * The lazy hook board loads call. Never throws: housekeeping must not break the page. A single atomic upsert claims the
+ * interval (a concurrent caller waits on the row, then sees the fresh `ran_at` and skips), so rapid calls run the
+ * database-wide purges once. Returns whether this call ran them.
+ */
+export async function runMaintenance(): Promise<boolean> {
   try {
+    const claim = await db().execute(sql`
+      insert into maintenance_run (name, ran_at) values ('purge', now())
+      on conflict (name) do update set ran_at = now()
+        where maintenance_run.ran_at <= now() - make_interval(mins => ${MAINTENANCE_INTERVAL_MINUTES})
+      returning name
+    `);
+    if (claim.length === 0) return false;
     const cleared = await purgeStaleLocations();
     const pruned = await pruneSyncOps();
     if (cleared || pruned) log.info("maintenance.ran", { locationsCleared: cleared, syncOpsPruned: pruned });
+    return true;
   } catch (err) {
     log.warn("maintenance.failed", { error: err instanceof Error ? err.name : "unknown" });
+    return false;
   }
 }

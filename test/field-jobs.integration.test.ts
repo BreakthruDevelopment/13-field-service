@@ -381,7 +381,8 @@ describe.skipIf(!testDatabaseUrl)("field service jobs (Postgres)", () => {
       expect(await located(oldCancelled)).toBe(0);
       expect((await sql`select lat, lng, accuracy_m, captured_at, to_status from job_event where job_id = ${old} and to_status = 'on_site'`)[0]).toMatchObject({ lat: null, lng: null, accuracy_m: null, captured_at: null });
       expect(await maintenance.purgeStaleLocations()).toBe(0); // nothing left to do
-      // The board load runs it lazily.
+      // The board load runs it lazily (at most once per interval, so make the interval look elapsed).
+      await sql`insert into maintenance_run (name, ran_at) values ('purge', now() - interval '1 hour') on conflict (name) do update set ran_at = excluded.ran_at`;
       await sql`update service_job set status = 'completed', completed_at = now() - interval '100 days' where id = ${recent}`;
       await board.getBoard(d1, { date: "2031-03-10" });
       expect(await located(recent)).toBe(0);
