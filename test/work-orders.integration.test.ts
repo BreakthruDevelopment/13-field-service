@@ -372,7 +372,7 @@ describe.skipIf(!testDatabaseUrl)("work orders (Postgres)", () => {
       expect(await sql`select 1 from work_order where job_id = ${job.id}`).toHaveLength(0);
     });
 
-    it("refunds the UTC day that was charged, and no rate event once the hour has passed", async () => {
+    it("refunds the UTC day that was charged", async () => {
       const job = await jobWith();
       const op = uuid();
       const hash = (await import("node:crypto")).createHash("sha256").update(JSON.stringify(["generate", job.id, { baseVersion: null }])).digest("hex");
@@ -380,13 +380,39 @@ describe.skipIf(!testDatabaseUrl)("work orders (Postgres)", () => {
       await sql`insert into work_order_op (actor_id, op_id, kind, job_id, payload_hash, created_at, claimed_at)
                 values (${t1.id}, ${op}, 'generate', ${job.id}, ${hash}, (date_trunc('day', now() at time zone 'utc') - interval '1 hour') at time zone 'utc', now() - interval '5 minutes')`;
       await sql`insert into daily_usage (day, kind, count) values ((now() at time zone 'utc')::date - 1, 'ai', 1), ((now() at time zone 'utc')::date, 'ai', 1)`;
-      await sql`insert into rate_event (user_id, kind) values (${t1.id}, 'ai')`; // someone else's current draft, not the dead claim's
       vi.mocked(generate).mockRejectedValueOnce(new AiError("Model provider timed out", "provider", "timeout"));
       expect((await fail(draft(t1, job.id, { clientOpId: op }))).status).toBe(502);
       const days = await sql`select day::text as day, count from daily_usage where kind = 'ai' order by day`;
       expect(days.map((d) => d.count)).toEqual([0, 1]); // yesterday refunded, today untouched
-      expect(await rateCount(t1)).toBe(1);
       expect(await opRows(job.id)).toEqual([]);
+    });
+
+    it("refunds the rate event that paid for the failed claim, not the newest one", async () => {
+      const job = await jobWith();
+      const op = uuid();
+      const hash = (await import("node:crypto")).createHash("sha256").update(JSON.stringify(["generate", job.id, { baseVersion: null }])).digest("hex");
+      // Claim A died 30 minutes ago; draft B succeeded since. A's takeover now fails: A's event goes, B's stays.
+      const [a] = await sql`insert into rate_event (user_id, kind, at) values (${t1.id}, 'ai', now() - interval '30 minutes') returning id`;
+      const [b] = await sql`insert into rate_event (user_id, kind, at) values (${t1.id}, 'ai', now()) returning id`;
+      await sql`insert into work_order_op (actor_id, op_id, kind, job_id, payload_hash, rate_event_id, claimed_at)
+                values (${t1.id}, ${op}, 'generate', ${job.id}, ${hash}, ${a.id}, now() - interval '5 minutes')`;
+      await sql`insert into daily_usage (day, kind, count) values ((now() at time zone 'utc')::date, 'ai', 2)`;
+      vi.mocked(generate).mockRejectedValueOnce(new AiError("Model provider timed out", "provider", "timeout"));
+      expect((await fail(draft(t1, job.id, { clientOpId: op }))).status).toBe(502);
+      expect((await sql`select id from rate_event where user_id = ${t1.id} and kind = 'ai'`).map((r) => r.id)).toEqual([b.id]);
+      expect(await dailyCount()).toBe(1);
+    });
+
+    it("a refund for a claim whose rate event has aged out leaves the newer events alone", async () => {
+      const job = await jobWith();
+      const op = uuid();
+      const hash = (await import("node:crypto")).createHash("sha256").update(JSON.stringify(["generate", job.id, { baseVersion: null }])).digest("hex");
+      const [b] = await sql`insert into rate_event (user_id, kind, at) values (${t1.id}, 'ai', now()) returning id`;
+      await sql`insert into work_order_op (actor_id, op_id, kind, job_id, payload_hash, rate_event_id, claimed_at)
+                values (${t1.id}, ${op}, 'generate', ${job.id}, ${hash}, ${uuid()}, now() - interval '5 minutes')`; // its event is gone
+      vi.mocked(generate).mockRejectedValueOnce(new AiError("Model provider timed out", "provider", "timeout"));
+      expect((await fail(draft(t1, job.id, { clientOpId: op }))).status).toBe(502);
+      expect((await sql`select id from rate_event where user_id = ${t1.id} and kind = 'ai'`).map((r) => r.id)).toEqual([b.id]);
     });
 
     it("a claim whose request died is held until the lease ends, then taken over without a second charge", async () => {

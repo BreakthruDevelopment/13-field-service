@@ -55,7 +55,8 @@ export async function dailyCount(kind: DailyKind): Promise<number> {
 
 /**
  * Record one attempt for `userId` unless they already made `limit` in the last `opts.windowSeconds` (default one hour). Call inside a
- * transaction: the per-user lock keeps two concurrent requests from both slipping under the limit.
+ * transaction: the per-user lock keeps two concurrent requests from both slipping under the limit. Returns the id of the
+ * recorded event, for callers that may need to refund exactly that one (`releaseRateEvent`).
  */
 export async function consumeRate(
   tx: Tx,
@@ -64,7 +65,7 @@ export async function consumeRate(
   limit: number,
   message: string,
   opts: { windowSeconds?: number; now?: Date } = {},
-): Promise<void> {
+): Promise<string> {
   const { rateEvent } = schema;
   await advisoryLock(tx, `rate:${kind}:${userId}`);
   const windowSeconds = opts.windowSeconds ?? HOUR_SECONDS;
@@ -80,7 +81,11 @@ export async function consumeRate(
     .from(rateEvent)
     .where(and(eq(rateEvent.userId, userId), eq(rateEvent.kind, kind), gt(rateEvent.at, sql`${nowSql} - ${window}`)));
   if (n >= limit) throw new TooManyRequestsError(message);
-  await tx.insert(rateEvent).values({ userId, kind, ...(opts.now ? { at: opts.now } : {}) });
+  const [row] = await tx
+    .insert(rateEvent)
+    .values({ userId, kind, ...(opts.now ? { at: opts.now } : {}) })
+    .returning({ id: rateEvent.id });
+  return row.id;
 }
 
 /** Undo one `consumeRate` (the newest row) when the work it paid for never happened. */
@@ -92,6 +97,13 @@ export async function releaseRate(tx: Tx, userId: string, kind: RateKind): Promi
       select id from rate_event where user_id = ${userId} and kind = ${kind} order by at desc limit 1
     )
   `);
+}
+
+/** Undo one specific `consumeRate` event by id (a no-op if it already aged out). Prefer it to `releaseRate` when the refund may come much later than the charge. */
+export async function releaseRateEvent(tx: Tx, userId: string, kind: RateKind, eventId: string): Promise<void> {
+  const { rateEvent } = schema;
+  await advisoryLock(tx, `rate:${kind}:${userId}`);
+  await tx.delete(rateEvent).where(and(eq(rateEvent.id, eventId), eq(rateEvent.userId, userId), eq(rateEvent.kind, kind)));
 }
 
 /**

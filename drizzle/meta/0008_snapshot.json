@@ -1,5 +1,5 @@
 {
-  "id": "5eea6fdb-385b-4065-a826-326e6351b6e3",
+  "id": "e32c0aed-eb77-45ab-849c-03d6a32baa9a",
   "prevId": "6e1a5c00-2421-4a9d-832e-babfc789123d",
   "version": "7",
   "dialect": "postgresql",
@@ -2526,6 +2526,12 @@
           "type": "text",
           "primaryKey": false,
           "notNull": true
+        },
+        "rate_event_id": {
+          "name": "rate_event_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
         },
         "result": {
           "name": "result",

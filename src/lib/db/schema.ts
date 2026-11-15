@@ -390,6 +390,11 @@ export const workOrderOp = pgTable(
       .notNull()
       .references(() => serviceJob.id, { onDelete: "cascade" }),
     payloadHash: text("payload_hash").notNull(),
+    /**
+     * The `rate_event` this draft was charged to, so a refund returns that very event. Deliberately not a foreign key: the
+     * rate limiter prunes aged events, and a cascade from that would lock claim rows in the opposite order to a refund.
+     */
+    rateEventId: uuid("rate_event_id"),
     result: jsonb("result").$type<Record<string, unknown>>(),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     claimedAt: timestamp("claimed_at", { withTimezone: true }).notNull().defaultNow(),

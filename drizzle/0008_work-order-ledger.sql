@@ -4,6 +4,7 @@ CREATE TABLE "work_order_op" (
 	"kind" text NOT NULL,
 	"job_id" uuid NOT NULL,
 	"payload_hash" text NOT NULL,
+	"rate_event_id" uuid,
 	"result" jsonb,
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
 	"claimed_at" timestamp with time zone DEFAULT now() NOT NULL,

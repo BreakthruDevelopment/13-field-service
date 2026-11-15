@@ -12,7 +12,7 @@ import { log } from "@/lib/log";
 import { safeErrorFields } from "@/lib/safe-error";
 import { MAX_NOTES_PER_JOB, lockJob } from "@/lib/service-jobs";
 import { jsonHasNul, text } from "@/lib/text";
-import { advisoryLock, consumeRate, releaseDaily, releaseRate, reserveDaily, type Tx } from "@/lib/usage";
+import { advisoryLock, consumeRate, releaseDaily, releaseRateEvent, reserveDaily, type Tx } from "@/lib/usage";
 import { RANKED_CANDIDATES, WHOLE_CATALOG_MAX, assembleDraft, buildPrompt, runWorkOrderModel } from "@/lib/work-order-ai";
 import { type CatalogPart, type LineFlag, type SafetyChip, checkLines, safetyChips } from "@/lib/work-order-checks";
 import { spendRead, writeTx } from "@/lib/write-tx";
@@ -334,7 +334,7 @@ export async function generateWorkOrder(actor: Actor, id: string, input: unknown
     const built = buildPrompt({ title: job.title, description: job.description, notes: bodies, candidates });
 
     if (charge) {
-      await consumeRate(tx, actor.id, "ai", AI_DRAFTS_PER_HOUR, "You've asked for a lot of AI drafts this hour. Try again later.");
+      const rateEventId = await consumeRate(tx, actor.id, "ai", AI_DRAFTS_PER_HOUR, "You've asked for a lot of AI drafts this hour. Try again later.");
       await advisoryLock(tx, aiJobLock(jobId));
       const [{ n }] = await tx
         .select({ n: count() })
@@ -344,7 +344,7 @@ export async function generateWorkOrder(actor: Actor, id: string, input: unknown
       if (!(await reserveDaily(tx, "ai", env().AI_DAILY_CAP))) throw new TooManyRequestsError("The app's AI drafts for today are used up. Try again tomorrow.");
       const [mine] = await tx
         .insert(workOrderOp)
-        .values({ actorId: actor.id, opId: data.clientOpId, kind: "generate", jobId, payloadHash: hash })
+        .values({ actorId: actor.id, opId: data.clientOpId, kind: "generate", jobId, payloadHash: hash, rateEventId })
         .onConflictDoNothing()
         .returning({ opId: workOrderOp.opId });
       // Only a parallel request with the same id for a different job can get here (the same job is serialized by its row lock).
@@ -471,13 +471,13 @@ async function refundDraft(actor: Actor, opId: string): Promise<void> {
         .delete(workOrderOp)
         .where(and(eq(workOrderOp.actorId, actor.id), eq(workOrderOp.opId, opId), eq(workOrderOp.kind, "generate"), isNull(workOrderOp.result)))
         .returning({
-          // The charge was taken in the transaction that created the claim, so its creation time says which UTC day was
-          // charged and whether the rate event is still inside the hour (a takeover can refund long after the charge).
+          // The charge was taken in the transaction that created the claim, so its creation time is the UTC day that was
+          // reserved (a takeover can refund long after), and `rateEventId` is the very rate event that paid for it.
           day: sql<string>`(${workOrderOp.createdAt} at time zone 'utc')::date::text`,
-          withinHour: sql<boolean>`${workOrderOp.createdAt} > now() - interval '1 hour'`,
+          rateEventId: workOrderOp.rateEventId,
         });
       if (removed.length === 0) return;
-      if (removed[0].withinHour) await releaseRate(tx, actor.id, "ai");
+      if (removed[0].rateEventId) await releaseRateEvent(tx, actor.id, "ai", removed[0].rateEventId);
       await releaseDaily(tx, "ai", removed[0].day);
     });
   } catch (err) {
