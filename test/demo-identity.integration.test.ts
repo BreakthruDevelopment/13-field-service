@@ -97,24 +97,27 @@ describe.skipIf(!url)("demo identity hooks (Better Auth + Postgres)", () => {
     expect((await call("/update-user", { name: "Plain Two" }, userCookie)).status).toBe(200);
   });
 
-  it("refuses /admin/create-user with a demo email or marker image, and allows an ordinary user", async () => {
+  // Field service disables Better Auth's /admin/create-user and /admin/update-user outright (DISABLED_AUTH_PATHS), so the
+  // demo-identity hook is now a second layer behind them. Neither path can create a user or set an image or email.
+  it("answers 403 or 404 to /admin/create-user, including with a demo email or marker image, and creates nobody", async () => {
     const make = (email: string, extra: object = {}) =>
       call("/admin/create-user", { name: "Made", email, password: PASSWORD, role: "user", ...extra }, adminCookie);
-    expect((await make("di-c1@demo.breakthru.test")).status).toBe(400);
-    expect((await make("di-c2@test.local", { data: { image: MARKER } })).status).toBe(400);
+    expect([403, 404]).toContain((await make("di-c1@demo.breakthru.test")).status);
+    expect([403, 404]).toContain((await make("di-c2@test.local", { data: { image: MARKER } })).status);
+    expect([403, 404]).toContain((await make("di-c3@test.local")).status);
     expect(await count("di-c1@demo.breakthru.test")).toBe(0);
     expect(await count("di-c2@test.local")).toBe(0);
-    expect((await make("di-c3@test.local")).status).toBe(200);
+    expect(await count("di-c3@test.local")).toBe(0);
   });
 
-  it("refuses /admin/update-user setting a demo email or marker image", async () => {
+  it("answers 403 or 404 to /admin/update-user and changes nothing", async () => {
     const upd = (data: object) => call("/admin/update-user", { userId: targetId, data }, adminCookie);
-    // Admins lack the `set-email` permission (permissions.ts), so an email change is refused even earlier (403).
-    expect([400, 403]).toContain((await upd({ email: "di-t@demo.breakthru.test" })).status);
-    expect((await upd({ image: MARKER })).status).toBe(400);
+    expect([403, 404]).toContain((await upd({ email: "di-t@demo.breakthru.test" })).status);
+    expect([403, 404]).toContain((await upd({ image: MARKER })).status);
+    expect([403, 404]).toContain((await upd({ name: "Target Two" })).status);
     expect(await imageOf("di-target@test.local")).not.toBe(MARKER);
     expect(await count("di-t@demo.breakthru.test")).toBe(0);
-    expect((await upd({ name: "Target Two" })).status).toBe(200);
+    expect((await sql`select name from "user" where id = ${targetId}`)[0].name).not.toBe("Target Two");
   });
 
   it("does not affect direct Drizzle-style writes, which is how the demo loader works", async () => {

@@ -3,7 +3,7 @@ import { cache } from "react";
 import { headers } from "next/headers";
 import { redirect } from "next/navigation";
 import { auth } from "./index";
-import { type Actor, type Role, ForbiddenError, UnauthorizedError, toRole } from "./rbac";
+import { type Actor, type Role, ForbiddenError, UnauthorizedError, homeFor, toRole } from "./rbac";
 
 export type CurrentUser = Actor & { name: string; email: string };
 
@@ -27,10 +27,13 @@ export async function requireUserOrRedirect(): Promise<CurrentUser> {
   return user;
 }
 
-/** For pages: signed-in users without the role go to the dashboard. */
-export async function requireRoleOrRedirect(role: Role): Promise<CurrentUser> {
+/**
+ * For pages: a signed-in user whose role isn't one of `roles` goes to their own home page (`/waiting` for a plain
+ * `user`). Roles are exact: admin does not pass a dispatcher or technician check.
+ */
+export async function requireRoleOrRedirect(...roles: Role[]): Promise<CurrentUser> {
   const user = await requireUserOrRedirect();
-  if (role === "admin" && user.role !== "admin") redirect("/dashboard");
+  if (!roles.includes(user.role)) redirect(homeFor(user.role));
   return user;
 }
 
@@ -41,8 +44,9 @@ export async function requireUser(): Promise<CurrentUser> {
   return user;
 }
 
-export async function requireRole(role: Role): Promise<CurrentUser> {
+/** 401 when signed out, 403 unless the user's role is exactly one of `roles` (admin is not a superset). */
+export async function requireRole(...roles: Role[]): Promise<CurrentUser> {
   const user = await requireUser();
-  if (role === "admin" && user.role !== "admin") throw new ForbiddenError();
+  if (!roles.includes(user.role)) throw new ForbiddenError();
   return user;
 }

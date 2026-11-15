@@ -1,0 +1,18 @@
+import { requireRole } from "@/lib/auth/session";
+import { requireSameOrigin } from "@/lib/csrf";
+import { errorResponse, readJson } from "@/lib/http";
+import { updatePart } from "@/lib/parts";
+
+export const dynamic = "force-dynamic";
+export const maxDuration = 25;
+
+/** PATCH /api/parts/:id (dispatcher) body { version, name?, unit?, aliases?, maxPerJob?, active? } -> { part }; stale version -> 409 { error, current } */
+export async function PATCH(request: Request, ctx: { params: Promise<{ id: string }> }) {
+  try {
+    requireSameOrigin(request);
+    const user = await requireRole("dispatcher");
+    return Response.json({ part: await updatePart(user, (await ctx.params).id, await readJson(request)) });
+  } catch (err) {
+    return errorResponse(err);
+  }
+}

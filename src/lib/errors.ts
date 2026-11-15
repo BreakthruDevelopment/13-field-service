@@ -22,6 +22,16 @@ export class ConflictError extends HttpError {
   }
 }
 
+/**
+ * A write carried a stale `version` (someone else changed the row first). `current` is the row as the caller may see it,
+ * so a client can show what changed; `errorResponse` sends it as `{ error, current }`.
+ */
+export class VersionConflictError extends ConflictError {
+  constructor(readonly current: unknown) {
+    super("This was changed by someone else. Review the latest version and try again.");
+  }
+}
+
 export class BadRequestError extends HttpError {
   constructor(message = "Bad request") {
     super(400, message);
