@@ -362,6 +362,8 @@ export async function generateWorkOrder(actor: Actor, id: string, input: unknown
       await assertActorCurrent(tx, actor);
       const job = await lockJob(tx, actor, jobId); // 404 when the job was reassigned while the model ran
       assertCan(actor, "create", "work_order", { assigneeId: job.assigneeId });
+      // Cancelling keeps the assignee and doesn't touch the work order's version, so neither check above sees it.
+      if (job.status === "cancelled") throw new WorkOrderError("job_cancelled", "This job was cancelled while the draft was being written.");
       const op = await findOp(tx, actor.id, data.clientOpId);
       if (!op) {
         keepCharge = true; // a takeover removed the claim and refunded it
@@ -468,10 +470,15 @@ async function refundDraft(actor: Actor, opId: string): Promise<void> {
       const removed = await tx
         .delete(workOrderOp)
         .where(and(eq(workOrderOp.actorId, actor.id), eq(workOrderOp.opId, opId), eq(workOrderOp.kind, "generate"), isNull(workOrderOp.result)))
-        .returning({ opId: workOrderOp.opId });
+        .returning({
+          // The charge was taken in the transaction that created the claim, so its creation time says which UTC day was
+          // charged and whether the rate event is still inside the hour (a takeover can refund long after the charge).
+          day: sql<string>`(${workOrderOp.createdAt} at time zone 'utc')::date::text`,
+          withinHour: sql<boolean>`${workOrderOp.createdAt} > now() - interval '1 hour'`,
+        });
       if (removed.length === 0) return;
-      await releaseRate(tx, actor.id, "ai");
-      await releaseDaily(tx, "ai");
+      if (removed[0].withinHour) await releaseRate(tx, actor.id, "ai");
+      await releaseDaily(tx, "ai", removed[0].day);
     });
   } catch (err) {
     log.error("workorder.refund_failed", safeErrorFields(err));

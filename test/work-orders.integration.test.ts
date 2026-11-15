@@ -358,6 +358,37 @@ describe.skipIf(!testDatabaseUrl)("work orders (Postgres)", () => {
       expect(await sql`select 1 from work_order where job_id = ${job.id}`).toHaveLength(0);
     });
 
+    it("a job cancelled while the model runs is refused at the write and refunded", async () => {
+      const job = await jobWith();
+      vi.mocked(generate).mockImplementationOnce((async (req: Parameters<typeof generate>[0]) => {
+        const fresh = await jobs.getJob(d1, job.id);
+        await jobs.updateJob(d1, job.id, { op: "cancel", version: fresh.version });
+        return { data: req.schema.parse(ok()), provider: "stub", model: "stub", demo: false, latencyMs: 1 };
+      }) as typeof generate);
+      expect(await fail(draft(t1, job.id))).toMatchObject({ status: 409, body: { code: "job_cancelled" } });
+      expect(await rateCount(t1)).toBe(0);
+      expect(await dailyCount()).toBe(0);
+      expect(await opRows(job.id)).toEqual([]);
+      expect(await sql`select 1 from work_order where job_id = ${job.id}`).toHaveLength(0);
+    });
+
+    it("refunds the UTC day that was charged, and no rate event once the hour has passed", async () => {
+      const job = await jobWith();
+      const op = uuid();
+      const hash = (await import("node:crypto")).createHash("sha256").update(JSON.stringify(["generate", job.id, { baseVersion: null }])).digest("hex");
+      // A claim charged yesterday at 23:00 UTC whose request died; today another request has used one draft.
+      await sql`insert into work_order_op (actor_id, op_id, kind, job_id, payload_hash, created_at, claimed_at)
+                values (${t1.id}, ${op}, 'generate', ${job.id}, ${hash}, (date_trunc('day', now() at time zone 'utc') - interval '1 hour') at time zone 'utc', now() - interval '5 minutes')`;
+      await sql`insert into daily_usage (day, kind, count) values ((now() at time zone 'utc')::date - 1, 'ai', 1), ((now() at time zone 'utc')::date, 'ai', 1)`;
+      await sql`insert into rate_event (user_id, kind) values (${t1.id}, 'ai')`; // someone else's current draft, not the dead claim's
+      vi.mocked(generate).mockRejectedValueOnce(new AiError("Model provider timed out", "provider", "timeout"));
+      expect((await fail(draft(t1, job.id, { clientOpId: op }))).status).toBe(502);
+      const days = await sql`select day::text as day, count from daily_usage where kind = 'ai' order by day`;
+      expect(days.map((d) => d.count)).toEqual([0, 1]); // yesterday refunded, today untouched
+      expect(await rateCount(t1)).toBe(1);
+      expect(await opRows(job.id)).toEqual([]);
+    });
+
     it("a claim whose request died is held until the lease ends, then taken over without a second charge", async () => {
       const job = await jobWith();
       const op = uuid();

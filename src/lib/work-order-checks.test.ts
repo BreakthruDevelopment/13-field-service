@@ -93,6 +93,8 @@ describe("redactContact", () => {
   it("masks emails and phone numbers but not part sizes", () => {
     expect(redactContact("call Sam on 555-010-1234 or sam@example.com")).toBe("call Sam on [phone] or [email]");
     expect(redactContact("(512) 555-0100 and +1 512.555.0100")).toBe("[phone] and [phone]");
+    expect(redactContact("5125550187, +15125550187 and (512)555-0187 and 1-512-555-0187")).toBe("[phone], [phone] and [phone] and [phone]");
+    expect(redactContact("PO 51255501870 and 1/2in x 5125550187/2")).toBe("PO 51255501870 and 1/2in x 5125550187/2");
     expect(redactContact("Ran 14/2 cable, 1/2in PEX, 20x25x1 filter, 3 ft")).toBe("Ran 14/2 cable, 1/2in PEX, 20x25x1 filter, 3 ft");
   });
 });

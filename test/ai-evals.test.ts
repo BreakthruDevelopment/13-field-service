@@ -175,6 +175,9 @@ describe("the prompt", () => {
   it("contains no customer contact data: names, phones, emails and addresses are not inputs, and typed ones are masked", () => {
     const built = buildPrompt({ ...input, notes: ["Customer Pat Rivera (pat.rivera@example.com, 512-555-0187) lives at 22 Elm St. Replaced the cartridge."] });
     expect(built.prompt).not.toMatch(/pat\.rivera@example\.com|512-555-0187/);
+    const bare = buildPrompt({ ...input, notes: ["Call 5125550187 or +15125550187 or (512)555-0187. Ran 14/2 cable and 20x25x1 filters."] });
+    expect(bare.prompt).not.toMatch(/5125550187|555-0187/);
+    expect(bare.prompt).toContain("14/2 cable and 20x25x1 filters");
     expect(built.prompt).toContain("[email]");
     expect(built.prompt).toContain("[phone]");
     // Fields that exist on the customer and site rows are simply never passed to the builder.

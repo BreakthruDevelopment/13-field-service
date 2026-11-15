@@ -94,9 +94,13 @@ export async function releaseRate(tx: Tx, userId: string, kind: RateKind): Promi
   `);
 }
 
-/** Undo one `reserveDaily` for today. Never goes below zero. */
-export async function releaseDaily(tx: Executor, kind: DailyKind): Promise<void> {
-  await tx.execute(sql`update daily_usage set count = greatest(count - 1, 0) where day = ${today} and kind = ${kind}`);
+/**
+ * Undo one `reserveDaily`. Never goes below zero. `day` (a UTC date, `YYYY-MM-DD`) is the day that was charged: pass it when
+ * the refund can happen after UTC midnight, or it would take a count off the new day instead.
+ */
+export async function releaseDaily(tx: Executor, kind: DailyKind, day?: string): Promise<void> {
+  const target = day ? sql`${day}::date` : today;
+  await tx.execute(sql`update daily_usage set count = greatest(count - 1, 0) where day = ${target} and kind = ${kind}`);
 }
 
 /** Read-only look at whether `userId` is already at `limit` for `kind` in the window (default one hour). Advisory: `consumeRate` decides. */

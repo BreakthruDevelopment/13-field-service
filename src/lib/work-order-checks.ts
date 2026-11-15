@@ -126,5 +126,6 @@ export function safetyChips(text: string): SafetyChip[] {
 export function redactContact(s: string): string {
   return s
     .replace(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi, "[email]")
-    .replace(/(?<![\d/])(?:\+?1[\s.-]?)?\(?\d{3}\)?[\s.-]\d{3}[\s.-]\d{4}(?![\d/])/g, "[phone]");
+    // Ten digits with or without a +1, spaces, dots, dashes or a bracketed area code. Not inside a longer number or a fraction (14/2, 1/2in).
+    .replace(/(?<![\d/])(?:\+?1[\s.-]?)?(?:\(\d{3}\)|\d{3})[\s.-]?\d{3}[\s.-]?\d{4}(?![\d/])/g, "[phone]");
 }
