@@ -5,7 +5,7 @@ import { BadRequestError, HttpError, PayloadTooLargeError, VersionConflictError 
 import { log } from "@/lib/log";
 import { safeErrorFields } from "@/lib/safe-error";
 
-export type ErrorInfo = { status: number; body: { error: string; issues?: unknown; current?: unknown } };
+export type ErrorInfo = { status: number; body: { error: string; issues?: unknown; current?: unknown; code?: string } };
 
 /** Map known errors to a status and a client-safe body; never leak stack traces or internals. */
 export function errorInfo(err: unknown): ErrorInfo {
@@ -13,7 +13,9 @@ export function errorInfo(err: unknown): ErrorInfo {
     return { status: 409, body: { error: err.message, current: err.current } };
   }
   if (err instanceof UnauthorizedError || err instanceof ForbiddenError || err instanceof HttpError) {
-    return { status: err.status, body: { error: err.message } };
+    // `code` (stable, machine-readable) is set by StatusRuleError: note_required, transition_not_allowed, job_closed.
+    const code = (err as { code?: unknown }).code;
+    return { status: err.status, body: { error: err.message, ...(typeof code === "string" ? { code } : {}) } };
   }
   if (err instanceof ZodError) {
     return {

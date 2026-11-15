@@ -243,6 +243,13 @@ describe.skipIf(!testDatabaseUrl)("API routes (Better Auth + Postgres)", () => {
       expect((await call("disp", partsRoute.POST, "POST", "/api/parts", { sku: "TST-RTE-PART", name: "Dupe" })).status).toBe(409);
     });
 
+    it("explains a refused status move with a stable code", async () => {
+      const job = (await call("disp", jobsRoute.POST, "POST", "/api/jobs", { customerId, siteId, title: "Rules" })).json.job;
+      const res = await call("disp", jobRoute.PATCH, "PATCH", `/api/jobs/${job.id}`, { op: "status", version: job.version, to: "completed" }, { ctx: idCtx(job.id) });
+      expect(res.status).toBe(409);
+      expect(res.json.code).toBe("transition_not_allowed");
+    });
+
     it("serves the board", async () => {
       const res = await call("disp", boardRoute.GET, "GET", "/api/board?date=2026-11-15&tz=America/Chicago");
       expect(res.status).toBe(200);
