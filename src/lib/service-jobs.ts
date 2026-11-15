@@ -34,6 +34,7 @@ type Q = Db | Tx;
 export const MAX_OPEN_JOBS = 2000;
 export const MAX_NOTES_PER_JOB = 200;
 export const BOARD_LIMIT = 200;
+export const MAX_EVENTS_SHOWN = 500;
 
 const { serviceJob, customer, site, user, jobNote, jobEvent, workOrder } = schema;
 
@@ -193,8 +194,9 @@ export async function loadJobDetail(q: Q, actor: Actor, id: string): Promise<Job
     .from(jobEvent)
     .innerJoin(user, eq(user.id, jobEvent.actorId))
     .where(eq(jobEvent.jobId, id))
-    .orderBy(asc(jobEvent.serverAt), asc(jobEvent.id))
-    .limit(500);
+    // The newest 500, shown oldest first: a long history keeps its recent events.
+    .orderBy(desc(jobEvent.serverAt), desc(jobEvent.id))
+    .limit(MAX_EVENTS_SHOWN);
   const [wo] = await q
     .select({ id: workOrder.id, status: workOrder.status, version: workOrder.version })
     .from(workOrder)
@@ -209,7 +211,7 @@ export async function loadJobDetail(q: Q, actor: Actor, id: string): Promise<Job
     customerDetail: actor.role === "dispatcher" ? { email: row.customerEmail, notes: row.customerNotes } : null,
     siteDetail: { lat: siteLat, lng: siteLng, accessNotes: row.siteAccessNotes },
     notes: notes.map((n) => ({ ...n, clientAt: iso(n.clientAt), serverAt: n.serverAt.toISOString() })),
-    events: events.map((e) => {
+    events: events.reverse().map((e) => {
       const lat = num(e.lat);
       const lng = num(e.lng);
       return {

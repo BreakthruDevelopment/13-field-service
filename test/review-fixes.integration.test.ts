@@ -200,4 +200,17 @@ describe.skipIf(!testDatabaseUrl)("review fixes (Postgres)", () => {
       expect(JSON.stringify(info.body)).not.toContain("deadlock");
     }
   });
+
+  it("a job with more than 500 events shows the newest 500, oldest first", async () => {
+    const job = await assigned(t1);
+    await sql`insert into job_event (job_id, actor_id, kind, server_at)
+      select ${job.id}, ${d1.id}, 'rescheduled', now() + (g || ' seconds')::interval from generate_series(1, 510) g`;
+    const detail = await jobs.getJob(d1, job.id);
+    expect(detail.events).toHaveLength(500);
+    const times = detail.events.map((e) => e.serverAt);
+    expect([...times].sort()).toEqual(times); // ascending for display
+    const newest = new Date((await sql`select max(server_at) as t from job_event where job_id = ${job.id}`)[0].t as string);
+    expect(times.at(-1)).toBe(newest.toISOString()); // the most recent event is there
+    expect(detail.events.some((e) => e.kind === "created")).toBe(false); // the oldest fell off
+  });
 });
