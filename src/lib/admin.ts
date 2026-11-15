@@ -9,7 +9,7 @@ import { type DemoSummary, loadDemoWorkspace } from "@/lib/demo";
 import { ConflictError, NotFoundError, TooManyRequestsError } from "@/lib/errors";
 import { ACTIVE_STATUSES } from "@/lib/job-status";
 import { log } from "@/lib/log";
-import { text } from "@/lib/text";
+import { idText, text } from "@/lib/text";
 import { consumeRate, dailyCount, reserveDaily } from "@/lib/usage";
 import { writeTx } from "@/lib/write-tx";
 
@@ -72,7 +72,7 @@ export async function listUsers(actor: Actor, input: unknown): Promise<{ users: 
 }
 
 export const setRoleInput = z.strictObject({
-  userId: z.string().min(1).max(100),
+  userId: idText,
   role: z.enum(GRANTABLE_ROLES),
 });
 

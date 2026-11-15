@@ -48,3 +48,9 @@ export function distanceM(a: { lat: number; lng: number }, b: { lat: number; lng
   const h = Math.sin(dLat / 2) ** 2 + Math.cos(rad(a.lat)) * Math.cos(rad(b.lat)) * Math.sin(dLng / 2) ** 2;
   return Math.round(2 * R * Math.asin(Math.min(1, Math.sqrt(h))));
 }
+
+/** A device-supplied `clientAt` is informational only: clamp it into [now - 7 days, now], like `capturedAt`. */
+export function clampClientAt(value: Date | null | undefined, now: Date = new Date()): Date | null {
+  if (!value) return null;
+  return new Date(Math.min(now.getTime(), Math.max(now.getTime() - CAPTURED_AT_CLAMP_MS, value.getTime())));
+}

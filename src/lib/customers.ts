@@ -203,7 +203,11 @@ async function insertSite(tx: Tx, actor: Actor, customerId: string, data: z.infe
 export async function updateSite(actor: Actor, id: string, input: unknown): Promise<SiteDto> {
   assertCan(actor, "update", "site");
   const siteId = uuid.parse(id);
-  const { version, lat, lng, ...fields } = sitePatchInput.parse(input);
+  const { version, lat: lat0, lng: lng0, ...fields } = sitePatchInput.parse(input);
+  // An explicit null on either coordinate clears both (the table keeps them in step).
+  const clear = lat0 === null || lng0 === null;
+  const lat = clear ? null : lat0;
+  const lng = clear ? null : lng0;
   return writeTx(actor, async (tx) => {
     const [row] = await tx
       .update(site)

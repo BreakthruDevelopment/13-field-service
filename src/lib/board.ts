@@ -40,10 +40,32 @@ function validTimeZone(tz: string): boolean {
   }
 }
 
+/** Postgres decides which zone names it can use (Intl knows some it doesn't), so ask it. */
+async function knownTimeZone(tz: string): Promise<boolean> {
+  const rows = await db().execute(sql`select 1 from pg_timezone_names where name = ${tz} limit 1`);
+  return rows.length > 0;
+}
+
+export type TechnicianDto = { id: string; name: string };
+
+async function activeTechnicians(): Promise<TechnicianDto[]> {
+  const techs = await db()
+    .select({ id: schema.user.id, name: schema.user.name, role: schema.user.role })
+    .from(schema.user)
+    .where(and(eq(schema.user.role, "technician"), sql`coalesce(${schema.user.banned}, false) = false`));
+  return techs.filter((t) => toRole(t.role) === "technician").map((t) => ({ id: t.id, name: t.name })).sort((a, b) => a.name.localeCompare(b.name));
+}
+
+/** GET /api/technicians: active technicians (id and name), for the assignee picker. Dispatchers only. */
+export async function listTechnicians(actor: Actor): Promise<{ technicians: TechnicianDto[] }> {
+  assertCan(actor, "read", "board");
+  return { technicians: await activeTechnicians() };
+}
+
 export async function getBoard(actor: Actor, input: unknown): Promise<Board> {
   assertCan(actor, "read", "board");
   const q = boardQuery.parse(input ?? {});
-  if (!validTimeZone(q.tz) || Number.isNaN(Date.parse(`${q.date}T00:00:00Z`)) || new Date(`${q.date}T00:00:00Z`).toISOString().slice(0, 10) !== q.date) {
+  if (!validTimeZone(q.tz) || !(await knownTimeZone(q.tz)) || Number.isNaN(Date.parse(`${q.date}T00:00:00Z`)) || new Date(`${q.date}T00:00:00Z`).toISOString().slice(0, 10) !== q.date) {
     throw new BadRequestError("Invalid date or time zone");
   }
   await runMaintenance(); // lazy purge of old check-in locations and the sync ledger (never throws)
@@ -61,14 +83,10 @@ export async function getBoard(actor: Actor, input: unknown): Promise<Board> {
   );
   const truncated = rows.length > BOARD_LIMIT;
   const kept = rows.slice(0, BOARD_LIMIT);
-  const techs = await db()
-    .select({ id: schema.user.id, name: schema.user.name, role: schema.user.role })
-    .from(schema.user)
-    .where(and(eq(schema.user.role, "technician"), sql`coalesce(${schema.user.banned}, false) = false`));
   return {
     date: q.date,
     tz: q.tz,
-    technicians: techs.filter((t) => toRole(t.role) === "technician").map((t) => ({ id: t.id, name: t.name })).sort((a, b) => a.name.localeCompare(b.name)),
+    technicians: await activeTechnicians(),
     jobs: kept.filter((j) => j.status !== "unassigned"),
     unassigned: kept.filter((j) => j.status === "unassigned"),
     truncated,

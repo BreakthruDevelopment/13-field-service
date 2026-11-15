@@ -15,8 +15,8 @@ import {
   isWorkTransition,
   transitionNeedsNote,
 } from "@/lib/job-status";
-import { distanceM, locationInput, normalizeLocation } from "@/lib/location";
-import { text } from "@/lib/text";
+import { clampClientAt, distanceM, locationInput, normalizeLocation } from "@/lib/location";
+import { idText, text } from "@/lib/text";
 import type { Tx } from "@/lib/usage";
 import { writeTx } from "@/lib/write-tx";
 
@@ -182,6 +182,7 @@ export async function loadJobDetail(q: Q, actor: Actor, id: string): Promise<Job
       fromStatus: jobEvent.fromStatus,
       toStatus: jobEvent.toStatus,
       actorName: user.name,
+      actorId: jobEvent.actorId,
       serverAt: jobEvent.serverAt,
       lat: jobEvent.lat,
       lng: jobEvent.lng,
@@ -218,8 +219,9 @@ export async function loadJobDetail(q: Q, actor: Actor, id: string): Promise<Job
         toStatus: e.toStatus,
         actorName: e.actorName,
         serverAt: e.serverAt.toISOString(),
+        // A technician sees check-in locations only from their own events; dispatchers see all.
         checkIn:
-          lat !== null && lng !== null
+          lat !== null && lng !== null && (actor.role === "dispatcher" || e.actorId === actor.id)
             ? {
                 lat,
                 lng,
@@ -255,7 +257,7 @@ export const newJobInput = z
     title: text(120, { min: 1, minMessage: "Title is required" }),
     description: text(2000).default(""),
     priority: z.enum(schema.JOB_PRIORITIES).default("normal"),
-    assigneeId: z.string().min(1).max(100).nullish(),
+    assigneeId: idText.nullish(),
     scheduledStart: when.nullish(),
     scheduledEnd: when.nullish(),
     /** One id per user intent (`opFor` in `src/lib/client-op.ts`): a retry never creates a second job. */
@@ -286,7 +288,7 @@ const version = z.number().int().min(1);
 
 /** PATCH /api/jobs/:id. Every op carries the `version` the client last saw; a stale one is a 409. */
 export const jobPatchInput = z.discriminatedUnion("op", [
-  z.strictObject({ op: z.literal("assign"), version, assigneeId: z.string().min(1).max(100), scheduledStart: when.optional(), scheduledEnd: when.optional() }).superRefine((v, ctx) => {
+  z.strictObject({ op: z.literal("assign"), version, assigneeId: idText, scheduledStart: when.optional(), scheduledEnd: when.optional() }).superRefine((v, ctx) => {
     if (Boolean(v.scheduledStart) !== Boolean(v.scheduledEnd)) ctx.addIssue({ code: "custom", path: ["scheduledEnd"], message: "Give both scheduledStart and scheduledEnd, or neither" });
     refineWindow(v, ctx);
   }),
@@ -306,7 +308,7 @@ export const jobPatchInput = z.discriminatedUnion("op", [
 
 export const jobListQuery = z.strictObject({
   status: z.enum(JOB_STATUSES).optional(),
-  assigneeId: z.string().min(1).max(100).optional(),
+  assigneeId: idText.optional(),
   customerId: uuid.optional(),
   q: text(100).optional(),
   from: z.iso.datetime({ offset: true }).optional(),
@@ -355,9 +357,17 @@ export async function getJob(actor: Actor, id: string): Promise<JobDetail> {
 // Writes
 // ---------------------------------------------------------------------------
 
-async function requireTechnician(q: Q, id: string): Promise<void> {
-  const [row] = await q.select({ role: user.role, banned: user.banned }).from(user).where(eq(user.id, id));
-  if (!row || row.banned || toRole(row.role) !== "technician") throw new BadRequestError("Assignee must be a technician");
+/**
+ * Whether `id` is an active technician right now. Reads the user row `for share`, so it waits for a concurrent role
+ * change (`setUserRole` locks the row `for update`) and an assignment can't slip in beside a revocation.
+ */
+async function isTechnician(tx: Tx, id: string): Promise<boolean> {
+  const [row] = await tx.select({ role: user.role, banned: user.banned }).from(user).where(eq(user.id, id)).for("share");
+  return Boolean(row) && !row.banned && toRole(row.role) === "technician";
+}
+
+async function requireTechnician(tx: Tx, id: string): Promise<void> {
+  if (!(await isTechnician(tx, id))) throw new BadRequestError("Assignee must be a technician");
 }
 
 async function insertEvent(
@@ -472,6 +482,7 @@ export async function applyStatusChange(
   if (opts.location && to !== "on_site") throw new BadRequestError("A location can only be sent when checking in on site");
   const location = opts.location ? normalizeLocation(opts.location, opts.now) : undefined;
   const now = opts.now ?? new Date();
+  const clientAt = clampClientAt(opts.clientAt, now);
   const [updated] = await tx
     .update(serviceJob)
     .set({
@@ -483,7 +494,7 @@ export async function applyStatusChange(
     })
     .where(eq(serviceJob.id, job.id))
     .returning();
-  await insertEvent(tx, { jobId: job.id, actorId: actor.id, kind: "status", from: job.status, to, location, clientAt: opts.clientAt, opId: opts.opId });
+  await insertEvent(tx, { jobId: job.id, actorId: actor.id, kind: "status", from: job.status, to, location, clientAt, opId: opts.opId });
   return updated;
 }
 
@@ -536,11 +547,19 @@ export async function updateJob(actor: Actor, id: string, input: unknown): Promi
       }
       case "reopen": {
         if (job.status !== "completed" && job.status !== "on_hold") throw new ConflictError("Only a completed or on-hold job can be reopened.");
-        await set({ status: "scheduled", completedAt: null, statusVersion: job.statusVersion + 1 });
-        await insertEvent(tx, { jobId, actorId: actor.id, kind: "status", from: job.status, to: "scheduled" });
+        // The technician may have lost the role since: then the job goes back to the tray instead of to someone who can't see it.
+        if (job.assigneeId && (await isTechnician(tx, job.assigneeId))) {
+          await set({ status: "scheduled", completedAt: null, statusVersion: job.statusVersion + 1 });
+          await insertEvent(tx, { jobId, actorId: actor.id, kind: "status", from: job.status, to: "scheduled" });
+        } else {
+          await set({ status: "unassigned", assigneeId: null, completedAt: null, statusVersion: job.statusVersion + 1 });
+          await insertEvent(tx, { jobId, actorId: actor.id, kind: "unassigned", from: job.status, to: "unassigned" });
+        }
         break;
       }
       case "edit": {
+        // A closed job's row stays still: an edit would move `updated_at`, which starts the 90-day location clock for cancelled jobs.
+        if (FINAL_STATUSES.includes(job.status)) throw new ConflictError("A closed job can't be edited. Reopen it first.");
         const { op: _op, version: _version, ...fields } = patch;
         void _op;
         void _version;
@@ -570,7 +589,7 @@ export async function appendNote(
   if (n >= MAX_NOTES_PER_JOB) throw new ConflictError("This job has the maximum number of notes.");
   const [row] = await tx
     .insert(jobNote)
-    .values({ jobId: job.id, authorId, body: note.body, opId: note.opId ?? null, clientAt: note.clientAt ?? null })
+    .values({ jobId: job.id, authorId, body: note.body, opId: note.opId ?? null, clientAt: clampClientAt(note.clientAt) })
     .onConflictDoNothing()
     .returning({ id: jobNote.id });
   if (row) return { id: row.id, created: true };
