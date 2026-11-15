@@ -83,6 +83,7 @@ export const SYNC_OUTCOMES = ["applied", "conflict", "rejected"] as const;
 export const WORK_ORDER_STATUSES = ["draft", "submitted", "approved", "returned"] as const;
 export const WORK_ORDER_LINE_USED = ["used", "needed"] as const;
 export const WORK_ORDER_LINE_SOURCES = ["ai", "human"] as const;
+export const WORK_ORDER_OP_KINDS = ["generate", "edit", "submit", "approve", "return"] as const;
 
 const list = (values: readonly string[]) => sql.raw(values.map((v) => `'${v}'`).join(", "));
 
@@ -367,6 +368,43 @@ export const workOrderLine = pgTable(
     check("work_order_line_mentioned_len_chk", sql`char_length(${t.mentioned}) between 1 and 120`),
     check("work_order_line_used_chk", sql`${t.used} in (${list(WORK_ORDER_LINE_USED)})`),
     check("work_order_line_source_chk", sql`${t.source} in (${list(WORK_ORDER_LINE_SOURCES)})`),
+  ],
+);
+
+/**
+ * Replay ledger for the work-order operations (13.3): AI draft, edit, submit, approve, return. The primary key makes a
+ * retry with the same `op_id` find the first attempt. `payload_hash` tells a real retry from an id reused for different
+ * input. For `generate`, a row with `result` null is a claim: it holds one charge (rate, daily, per-job) while the model
+ * runs, and it is deleted again, with the charges refunded, if the draft fails. Its `created_at` is what the per-job
+ * daily limit counts; `claimed_at` is the lease a retry waits out before taking over a claim whose request died.
+ */
+export const workOrderOp = pgTable(
+  "work_order_op",
+  {
+    actorId: text("actor_id")
+      .notNull()
+      .references(() => user.id, { onDelete: "restrict" }),
+    opId: uuid("op_id").notNull(),
+    kind: text("kind", { enum: WORK_ORDER_OP_KINDS }).notNull(),
+    jobId: uuid("job_id")
+      .notNull()
+      .references(() => serviceJob.id, { onDelete: "cascade" }),
+    payloadHash: text("payload_hash").notNull(),
+    /**
+     * The `rate_event` this draft was charged to, so a refund returns that very event. Deliberately not a foreign key: the
+     * rate limiter prunes aged events, and a cascade from that would lock claim rows in the opposite order to a refund.
+     */
+    rateEventId: uuid("rate_event_id"),
+    result: jsonb("result").$type<Record<string, unknown>>(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    claimedAt: timestamp("claimed_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.actorId, t.opId] }),
+    index("work_order_op_job_kind_idx").on(t.jobId, t.kind, t.createdAt),
+    index("work_order_op_actor_created_idx").on(t.actorId, t.createdAt),
+    check("work_order_op_kind_chk", sql`${t.kind} in (${list(WORK_ORDER_OP_KINDS)})`),
+    check("work_order_op_result_size_chk", sql`${t.result} is null or octet_length(${t.result}::text) <= 65536`),
   ],
 );
 
