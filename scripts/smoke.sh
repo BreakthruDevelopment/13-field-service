@@ -29,13 +29,16 @@ for path in / /sign-in; do
   page=$(curl -fsS "$BASE_URL$path") || fail "page $path did not render"
   echo "$page" | grep -q 'Explore breakthruventures.ai' || fail "page $path is missing the shared footer"
 done
+page=$(curl -fsS "$BASE_URL/") || fail "landing did not render"
+echo "$page" | grep -qi 'technician' || fail "landing should describe field service (technicians)"
+echo "$page" | grep -q 'Sign in' || fail "landing should offer sign in"
 pass "pages render inside the shared shell"
 
-for path in /dashboard /admin; do
+for path in /dashboard /admin /parts; do
   code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE_URL$path")
   [ "$code" = "307" ] || fail "signed-out $path should redirect (307), got $code"
 done
-pass "signed-out dashboard and admin redirect"
+pass "signed-out dashboard, admin and parts redirect"
 
 # --- helpers -----------------------------------------------------------------------------------------------------
 
@@ -110,6 +113,13 @@ fi
 ID_T1=$(user_id "$JAR_T1"); [ -n "$ID_T1" ] || fail "could not read the technician's id"
 ID_N=$(user_id "$JAR_N"); [ -n "$ID_N" ] || fail "could not read the new user's id"
 ID_T2=""; if [ "$HAVE_T2" = 1 ]; then ID_T2=$(user_id "$JAR_T2"); fi
+
+page=$(curl -fsS -b "$JAR_D" "$BASE_URL/parts") || fail "dispatcher /parts did not render"
+echo "$page" | grep -q 'Add a part' || fail "dispatcher /parts missing the add form"
+echo "$page" | grep -q 'Explore breakthruventures.ai' || fail "dispatcher /parts missing the shared footer"
+code=$(curl -s -o /dev/null -w '%{http_code}' -b "$JAR_T1" "$BASE_URL/parts")
+[ "$code" = "307" ] || fail "technician /parts should redirect (307), got $code"
+pass "dispatcher parts catalog renders; technicians are redirected"
 
 # --- a new sign-up has no role -----------------------------------------------------------------------------------
 
@@ -238,6 +248,11 @@ pass "parts: idempotent create, duplicate SKU 409, technicians read active parts
 # --- admin: counts and the only way a role changes ---------------------------------------------------------------
 
 if [ "$HAVE_ADMIN" = 1 ]; then
+  page=$(curl -fsS -b "$JAR_A" "$BASE_URL/admin") || fail "admin page did not render"
+  echo "$page" | grep -q 'Load demo workspace' || fail "admin page missing the demo button"
+  echo "$page" | grep -q 'Jobs by status' || fail "admin page missing job counts"
+  echo "$page" | grep -q 'Grant a role' || fail "admin page missing role grants"
+  echo "$page" | grep -q 'Explore breakthruventures.ai' || fail "admin page missing the shared footer"
   api "$JAR_A" GET /api/admin/stats; want 200 "admin counts"
   jq -e '.jobsByStatus and .usersByRole and .ai' <<<"$BODY" >/dev/null || fail "admin stats missing fields: $BODY"
   api "$JAR_A" GET /api/jobs; want 403 "admin reading jobs"
