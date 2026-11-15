@@ -57,6 +57,13 @@
       "when": 1794781496348,
       "tag": "0007_read-limit-maintenance-run",
       "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1794783144557,
+      "tag": "0008_work-order-ledger",
+      "breakpoints": true
     }
   ]
 }

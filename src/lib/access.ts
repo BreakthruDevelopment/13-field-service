@@ -9,10 +9,11 @@ import { serviceJob } from "@/lib/db/schema";
  * | Role        | Can                                                                                              |
  * | ----------- | ------------------------------------------------------------------------------------------------ |
  * | user        | nothing (a new sign-up waits on `/waiting` until an admin grants a role)                         |
- * | technician  | jobs with `assignee_id = actor.id`, plus their notes, events and work order (create/update the   |
- * |             | work order draft); the customer name/phone and site of those jobs come through the job; read the |
- * |             | parts catalog. Customers, sites and the board are not readable on their own.                     |
- * | dispatcher  | customers, sites, jobs, notes, events, parts, the board, work orders (all); never `/api/sync`    |
+ * | technician  | jobs with `assignee_id = actor.id`, plus their notes, events and work order (draft, edit, submit); |
+ * |             | the customer name/phone and site of those jobs come through the job; read the parts catalog.     |
+ * |             | Customers, sites and the board are not readable on their own.                                    |
+ * | dispatcher  | customers, sites, jobs, notes, events, parts, the board, work orders (all: draft, edit, approve,  |
+ * |             | return); never `/api/sync`                                                                       |
  * | admin       | `stats`, `user_directory` (read) and `role` (update) and `demo` only; no job, customer or        |
  * |             | location content                                                                                 |
  *
@@ -23,7 +24,11 @@ import { serviceJob } from "@/lib/db/schema";
  *   Passing the row (`{ assigneeId }`) to `assertCan` checks the same rule a second time.
  */
 
-export type Action = "read" | "create" | "update" | "delete";
+/**
+ * `submit` and `approve` are the work-order review steps (decision D4): the technician submits their own order, a
+ * dispatcher approves or returns it. Neither role holds the other's action.
+ */
+export type Action = "read" | "create" | "update" | "delete" | "submit" | "approve";
 
 export type Resource =
   | "customer"
@@ -50,7 +55,7 @@ const RULES: Record<Actor["role"], Rule> = {
     job_note: ["read", "create"],
     job_event: ["read"],
     part: ["read"],
-    work_order: ["read", "create", "update"],
+    work_order: ["read", "create", "update", "submit"],
   },
   dispatcher: {
     customer: ALL,
@@ -60,7 +65,7 @@ const RULES: Record<Actor["role"], Rule> = {
     job_event: ["read"],
     part: ["read", "create", "update"],
     board: ["read"],
-    work_order: ["read", "update"],
+    work_order: ["read", "create", "update", "approve"],
   },
   admin: {
     stats: ["read"],

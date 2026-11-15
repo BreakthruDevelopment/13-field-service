@@ -11,6 +11,25 @@ export const demoFixtures: Record<string, unknown> = {
       "You have a few open items. The most recent ones focus on setup work; nothing looks overdue.",
     highlights: ["Setup tasks are the largest group", "No items are flagged urgent"],
   },
+  // 13.3. Recorded for the seeded job "Kitchen sink leaking under cabinet" (src/lib/demo.ts): its notes mention every
+  // `mentioned` below. Against any other job the server checks drop the rows that aren't in that job's notes and the UI
+  // says so, so a demo stays honest. The supply line is not in the demo catalog (only 12 in and 16 in are), so it stays unmatched.
+  "work-order-draft": {
+    summary:
+      "Demo work order (recorded, not from a live model): replaced the faucet cartridge and a compression fitting; supply line to replace next visit.",
+    tasks: [
+      { description: "Replaced the worn faucet cartridge", state: "done" },
+      { description: "Replaced two 1/2 in compression fittings on the hot and cold supply", state: "done" },
+      { description: "Replace the cracked braided supply line", state: "to_do" },
+    ],
+    parts: [
+      { sku: "PLB-CART-STD", mentioned: "faucet cartridge", qty: 1, unit: "each", used: "used" },
+      { sku: "PLB-COMP-050", mentioned: "compression fittings", qty: 2, unit: "each", used: "used" },
+      { sku: null, mentioned: "braided supply line 20in", qty: 1, unit: "each", used: "needed" },
+    ],
+    followUp: "Return to replace the 20 in braided supply line.",
+    needsHumanBecause: null,
+  },
 };
 
 /**
