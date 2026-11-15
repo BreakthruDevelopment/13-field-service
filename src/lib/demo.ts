@@ -11,13 +11,14 @@
  * address under `demo.breakthru.test`; an unrelated account that already uses a demo id or email is never touched (409).
  * Loading again replaces the demo customers (and their sites and jobs) and keeps the demo users and parts.
  */
-import { and, eq, inArray } from "drizzle-orm";
+import { and, count, eq, inArray, sql } from "drizzle-orm";
 import type { PostgresJsDatabase } from "drizzle-orm/postgres-js";
+import { CAP_LOCKS, MAX_OPEN_JOBS, MAX_PARTS } from "./caps";
 import { DEMO_EMAIL_DOMAIN, MARKER } from "./demo-identity";
 import { ConflictError } from "./errors";
 import * as schema from "./db/schema";
 
-type Exec = Pick<PostgresJsDatabase<typeof schema>, "select" | "insert" | "update" | "delete">;
+type Exec = Pick<PostgresJsDatabase<typeof schema>, "select" | "insert" | "update" | "delete" | "execute">;
 
 export const DEMO_DISPATCHERS = [
   { id: "demo-fs-dispatcher-1", name: "Dana Whitfield (demo dispatcher)" },
@@ -173,6 +174,8 @@ const day = (base: Date, offset: number, hour: number) => {
 /** Run inside one transaction. Throws `ConflictError` when a demo id or email already belongs to a real account. */
 export async function loadDemoWorkspace(tx: Exec, opts: { now?: Date; password?: string } = {}): Promise<DemoSummary> {
   const now = opts.now ?? new Date();
+  // One demo load at a time: the clash check below and the replace-everything delete/insert must not interleave.
+  await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${CAP_LOCKS.demoLoad}, 0))`);
   const { user, account, customer, site, serviceJob, jobNote, jobEvent, part } = schema;
   const people = [
     ...DEMO_DISPATCHERS.map((p, i) => ({ ...p, role: "dispatcher", email: `fs-dispatcher-${i + 1}@${DEMO_EMAIL_DOMAIN}` })),
@@ -279,6 +282,14 @@ export async function loadDemoWorkspace(tx: Exec, opts: { now?: Date; password?:
       await ev({ kind: "status", actorId: assignee!, fromStatus: "on_site", toStatus: "completed" });
     }
   }
+
+  // The demo adds parts and open jobs, so it honours the same caps as the API (cap locks last, same names as the API uses).
+  await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${CAP_LOCKS.parts}, 0))`);
+  const [{ parts }] = await tx.select({ parts: count() }).from(part);
+  if (parts > MAX_PARTS) throw new ConflictError("The part catalog is full. The demo wasn't loaded.");
+  await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${CAP_LOCKS.openJobs}, 0))`);
+  const [{ open }] = await tx.select({ open: count() }).from(serviceJob).where(inArray(serviceJob.status, ["unassigned", "scheduled", "en_route", "on_site", "on_hold"]));
+  if (open > MAX_OPEN_JOBS) throw new ConflictError("Too many open jobs. The demo wasn't loaded.");
 
   return { dispatchers: DEMO_DISPATCHERS.length, technicians: DEMO_TECHNICIANS.length, customers: customers.length, sites: sites.length, parts: DEMO_PARTS.length, jobs: DEMO_JOBS.length };
 }

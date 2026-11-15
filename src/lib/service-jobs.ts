@@ -17,6 +17,7 @@ import {
 } from "@/lib/job-status";
 import { clampClientAt, distanceM, locationInput, normalizeLocation } from "@/lib/location";
 import { idText, text } from "@/lib/text";
+import { CAP_LOCKS, capLimits, MAX_OPEN_JOBS } from "@/lib/caps";
 import { advisoryLock, type Tx } from "@/lib/usage";
 import { spendRead, writeTx } from "@/lib/write-tx";
 
@@ -31,9 +32,7 @@ import { spendRead, writeTx } from "@/lib/write-tx";
 
 type Q = Db | Tx;
 
-export const MAX_OPEN_JOBS = 2000;
-/** The live cap. A mutable holder only so tests can lower it for their own process; production never changes it. */
-export const jobLimits = { maxOpen: MAX_OPEN_JOBS };
+export { MAX_OPEN_JOBS };
 export const MAX_NOTES_PER_JOB = 200;
 export const BOARD_LIMIT = 200;
 export const MAX_EVENTS_SHOWN = 500;
@@ -416,9 +415,9 @@ type JobRow = typeof serviceJob.$inferSelect;
 
 /** The open-jobs cap, checked under one advisory lock so two creates (or a create and a reopen) can't both take the last slot. */
 async function requireOpenCapacity(tx: Tx): Promise<void> {
-  await advisoryLock(tx, "service_job:open_cap");
+  await advisoryLock(tx, CAP_LOCKS.openJobs);
   const [{ n }] = await tx.select({ n: count() }).from(serviceJob).where(inArray(serviceJob.status, [...OPEN_STATUSES]));
-  if (n >= jobLimits.maxOpen) throw new ConflictError("Too many open jobs. Complete or cancel some first.");
+  if (n >= capLimits.openJobs) throw new ConflictError("Too many open jobs. Complete or cancel some first.");
 }
 
 export async function createJob(actor: Actor, input: unknown): Promise<{ job: JobDetail; created: boolean }> {
@@ -605,6 +604,8 @@ export async function appendNote(
   authorId: string,
   note: { body: string; opId?: string | null; clientAt?: Date | null },
 ): Promise<{ id: string; created: boolean }> {
+  // The 200-note cap counts then inserts, so the job row lock is taken here too (re-entrant when the caller already holds it).
+  await tx.select({ id: serviceJob.id }).from(serviceJob).where(eq(serviceJob.id, job.id)).for("update");
   if (note.opId) {
     const [existing] = await tx.select({ id: jobNote.id }).from(jobNote).where(and(eq(jobNote.authorId, authorId), eq(jobNote.opId, note.opId)));
     if (existing) return { id: existing.id, created: false };

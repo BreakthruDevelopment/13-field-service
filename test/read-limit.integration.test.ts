@@ -14,6 +14,7 @@ describe.skipIf(!testDatabaseUrl)("read limit, maintenance throttle, open-job ca
   let board: typeof import("@/lib/board");
   let adminLib: typeof import("@/lib/admin");
   let maintenance: typeof import("@/lib/maintenance");
+  let caps: typeof import("@/lib/caps");
   let writeTx: typeof import("@/lib/write-tx");
   let errorInfo: typeof import("@/lib/http").errorInfo;
   let customerId: string, siteId: string;
@@ -32,6 +33,7 @@ describe.skipIf(!testDatabaseUrl)("read limit, maintenance throttle, open-job ca
     board = await import("@/lib/board");
     adminLib = await import("@/lib/admin");
     maintenance = await import("@/lib/maintenance");
+    caps = await import("@/lib/caps");
     writeTx = await import("@/lib/write-tx");
     ({ errorInfo } = await import("@/lib/http"));
     customerId = (await customers.createCustomer(d1, { name: "Co", phone: "1" })).customer.id;
@@ -90,16 +92,16 @@ describe.skipIf(!testDatabaseUrl)("read limit, maintenance throttle, open-job ca
     const fresh = await jobs.getJob(d1, target.id);
 
     const [{ open }] = await sql`select count(*)::int as open from service_job where status in ('unassigned','scheduled','en_route','on_site','on_hold')`;
-    const original = jobs.jobLimits.maxOpen;
-    jobs.jobLimits.maxOpen = open;
+    const original = caps.capLimits.openJobs;
+    caps.capLimits.openJobs = open;
     try {
       expect(await status(jobs.updateJob(d1, target.id, { op: "reopen", version: fresh.version }))).toBe(409);
       expect(await status(jobs.createJob(d1, { customerId, siteId, title: "One more", clientOpId: uuid() }))).toBe(409);
       expect((await jobs.getJob(d1, target.id)).status).toBe("completed");
-      jobs.jobLimits.maxOpen = open + 1000;
+      caps.capLimits.openJobs = open + 1000;
       expect(await status(jobs.updateJob(d1, target.id, { op: "reopen", version: fresh.version }))).toBe(200);
     } finally {
-      jobs.jobLimits.maxOpen = original;
+      caps.capLimits.openJobs = original;
     }
   });
 });

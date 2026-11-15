@@ -6,6 +6,8 @@ import type { Actor } from "@/lib/auth/rbac";
 import { db, schema } from "@/lib/db";
 import { ConflictError, NotFoundError, VersionConflictError } from "@/lib/errors";
 import { text } from "@/lib/text";
+import { CAP_LOCKS, capLimits, MAX_PARTS } from "@/lib/caps";
+import { advisoryLock } from "@/lib/usage";
 import { spendRead, writeTx } from "@/lib/write-tx";
 
 /**
@@ -15,7 +17,7 @@ import { spendRead, writeTx } from "@/lib/write-tx";
 
 const { part } = schema;
 
-export const MAX_PARTS = 500;
+export { MAX_PARTS };
 
 export type PartDto = {
   id: string;
@@ -121,8 +123,10 @@ export async function createPart(actor: Actor, input: unknown): Promise<{ part: 
       const [existing] = await tx.select().from(part).where(and(eq(part.createdBy, actor.id), eq(part.clientOpId, data.clientOpId)));
       if (existing) return { part: toPart(existing), created: false };
     }
+    // Serialized with a cap lock: two dispatchers at 499 parts must not both insert.
+    await advisoryLock(tx, CAP_LOCKS.parts);
     const [{ n }] = await tx.select({ n: count() }).from(part);
-    if (n >= MAX_PARTS) throw new ConflictError("The catalog is full (500 parts).");
+    if (n >= capLimits.parts) throw new ConflictError("The catalog is full (500 parts).");
     const [row] = await tx
       .insert(part)
       .values({ ...data, aliases: data.aliases, clientOpId: data.clientOpId ?? null, createdBy: actor.id })
