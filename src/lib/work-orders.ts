@@ -7,7 +7,7 @@ import { type Actor, ForbiddenError, toRole } from "@/lib/auth/rbac";
 import { AI_DRAFTS_PER_HOUR, aiJobLock, capLimits } from "@/lib/caps";
 import { type Db, db, schema } from "@/lib/db";
 import { env } from "@/lib/env";
-import { BadRequestError, ConflictError, NotFoundError, TooManyRequestsError, VersionConflictError } from "@/lib/errors";
+import { BadRequestError, ConflictError, HttpError, NotFoundError, TooManyRequestsError, VersionConflictError } from "@/lib/errors";
 import { log } from "@/lib/log";
 import { safeErrorFields } from "@/lib/safe-error";
 import { MAX_NOTES_PER_JOB, lockJob } from "@/lib/service-jobs";
@@ -280,7 +280,9 @@ async function loadCandidates(tx: Tx, source: string): Promise<CatalogPart[]> {
 
 type Claim =
   | { type: "replay"; workOrder: WorkOrderDto }
-  | { type: "run"; built: ReturnType<typeof buildPrompt> };
+  | { type: "run"; built: ReturnType<typeof buildPrompt> }
+  /** A taken-over claim that can no longer be completed (the order moved on): refunded in the same transaction, then this is thrown. */
+  | { type: "refused"; error: unknown };
 
 /**
  * POST /api/jobs/:id/work-order/draft. Online only; the model runs inside this request (nothing runs in the background)
@@ -315,23 +317,37 @@ export async function generateWorkOrder(actor: Actor, id: string, input: unknown
       charge = false;
     }
 
-    if (job.status === "cancelled") throw new WorkOrderError("job_cancelled", "This job was cancelled.");
-    const wo = await lockWorkOrder(tx, jobId);
-    if (wo && (wo.status === "submitted" || wo.status === "approved")) {
-      throw new WorkOrderError("work_order_locked", "This work order is already submitted. A dispatcher has to return it before it can be redrafted.");
-    }
-    if ((wo?.version ?? null) !== data.baseVersion) throw new VersionConflictError(await loadWorkOrder(tx, jobId));
-    const notes = await tx
-      .select({ body: jobNote.body })
-      .from(jobNote)
-      .where(eq(jobNote.jobId, jobId))
-      .orderBy(asc(jobNote.serverAt), asc(jobNote.id))
-      .limit(MAX_NOTES_PER_JOB);
-    if (notes.length === 0) throw new WorkOrderError("no_notes", "Add a note about the work before drafting a work order.");
+    const prepare = async () => {
+      if (job.status === "cancelled") throw new WorkOrderError("job_cancelled", "This job was cancelled.");
+      const wo = await lockWorkOrder(tx, jobId);
+      if (wo && (wo.status === "submitted" || wo.status === "approved")) {
+        throw new WorkOrderError("work_order_locked", "This work order is already submitted. A dispatcher has to return it before it can be redrafted.");
+      }
+      if ((wo?.version ?? null) !== data.baseVersion) throw new VersionConflictError(await loadWorkOrder(tx, jobId));
+      const notes = await tx
+        .select({ body: jobNote.body })
+        .from(jobNote)
+        .where(eq(jobNote.jobId, jobId))
+        .orderBy(asc(jobNote.serverAt), asc(jobNote.id))
+        .limit(MAX_NOTES_PER_JOB);
+      if (notes.length === 0) throw new WorkOrderError("no_notes", "Add a note about the work before drafting a work order.");
 
-    const bodies = notes.map((n) => n.body);
-    const candidates = await loadCandidates(tx, [job.title, job.description, ...bodies].join(" "));
-    const built = buildPrompt({ title: job.title, description: job.description, notes: bodies, candidates });
+      const bodies = notes.map((n) => n.body);
+      const candidates = await loadCandidates(tx, [job.title, job.description, ...bodies].join(" "));
+      const built = buildPrompt({ title: job.title, description: job.description, notes: bodies, candidates });
+
+      return built;
+    };
+    let built: ReturnType<typeof buildPrompt>;
+    try {
+      built = await prepare();
+    } catch (err) {
+      // A claim being retaken that can't be completed any more (cancelled, submitted, a newer version, notes gone) would
+      // otherwise keep its charges for good: every retry fails the same check. Refund it here, in this transaction.
+      if (charge || !(err instanceof HttpError)) throw err;
+      await refundClaim(tx, actor.id, data.clientOpId);
+      return { type: "refused", error: err };
+    }
 
     if (charge) {
       const rateEventId = await consumeRate(tx, actor.id, "ai", AI_DRAFTS_PER_HOUR, "You've asked for a lot of AI drafts this hour. Try again later.");
@@ -354,6 +370,7 @@ export async function generateWorkOrder(actor: Actor, id: string, input: unknown
   });
 
   if (claim.type === "replay") return { workOrder: claim.workOrder, replayed: true };
+  if (claim.type === "refused") throw claim.error;
 
   let keepCharge = false;
   try {
@@ -466,23 +483,26 @@ export async function generateWorkOrder(actor: Actor, id: string, input: unknown
  */
 async function refundDraft(actor: Actor, opId: string): Promise<void> {
   try {
-    await db().transaction(async (tx) => {
-      const removed = await tx
-        .delete(workOrderOp)
-        .where(and(eq(workOrderOp.actorId, actor.id), eq(workOrderOp.opId, opId), eq(workOrderOp.kind, "generate"), isNull(workOrderOp.result)))
-        .returning({
-          // The charge was taken in the transaction that created the claim, so its creation time is the UTC day that was
-          // reserved (a takeover can refund long after), and `rateEventId` is the very rate event that paid for it.
-          day: sql<string>`(${workOrderOp.createdAt} at time zone 'utc')::date::text`,
-          rateEventId: workOrderOp.rateEventId,
-        });
-      if (removed.length === 0) return;
-      if (removed[0].rateEventId) await releaseRateEvent(tx, actor.id, "ai", removed[0].rateEventId);
-      await releaseDaily(tx, "ai", removed[0].day);
-    });
+    await db().transaction((tx) => refundClaim(tx, actor.id, opId));
   } catch (err) {
     log.error("workorder.refund_failed", safeErrorFields(err));
   }
+}
+
+/** Delete the unfinished claim and return what it was charged: its rate event and its UTC day. Takes the rate lock, then the daily row. */
+async function refundClaim(tx: Tx, actorId: string, opId: string): Promise<void> {
+  const removed = await tx
+    .delete(workOrderOp)
+    .where(and(eq(workOrderOp.actorId, actorId), eq(workOrderOp.opId, opId), eq(workOrderOp.kind, "generate"), isNull(workOrderOp.result)))
+    .returning({
+      // The charge was taken in the transaction that created the claim, so its creation time is the UTC day that was
+      // reserved (a takeover can refund long after), and `rateEventId` is the very rate event that paid for it.
+      day: sql<string>`(${workOrderOp.createdAt} at time zone 'utc')::date::text`,
+      rateEventId: workOrderOp.rateEventId,
+    });
+  if (removed.length === 0) return;
+  if (removed[0].rateEventId) await releaseRateEvent(tx, actorId, "ai", removed[0].rateEventId);
+  await releaseDaily(tx, "ai", removed[0].day);
 }
 
 // ---------------------------------------------------------------------------

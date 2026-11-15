@@ -372,6 +372,27 @@ describe.skipIf(!testDatabaseUrl)("work orders (Postgres)", () => {
       expect(await sql`select 1 from work_order where job_id = ${job.id}`).toHaveLength(0);
     });
 
+    it("a dead claim that can no longer be completed (the order moved on) is refunded when its retry is refused", async () => {
+      const job = await jobWith();
+      const first = (await draft(t1, job.id)).workOrder; // version 1; one charge each
+      const op = uuid();
+      const hash = (await import("node:crypto")).createHash("sha256").update(JSON.stringify(["generate", job.id, { baseVersion: null }])).digest("hex");
+      const [ev] = await sql`insert into rate_event (user_id, kind) values (${t1.id}, 'ai') returning id`;
+      await sql`insert into work_order_op (actor_id, op_id, kind, job_id, payload_hash, rate_event_id, claimed_at)
+                values (${t1.id}, ${op}, 'generate', ${job.id}, ${hash}, ${ev.id}, now() - interval '5 minutes')`;
+      await sql`update daily_usage set count = count + 1 where kind = 'ai' and day = (now() at time zone 'utc')::date`;
+      expect(await rateCount(t1)).toBe(2);
+      expect(await dailyCount()).toBe(2);
+      // The retry can't succeed (the client's baseVersion null is stale) and must not keep the claim's charges.
+      const r = await fail(draft(t1, job.id, { clientOpId: op }));
+      expect(r.status).toBe(409);
+      expect((r.body.current as { id: string }).id).toBe(first.id);
+      expect(await rateCount(t1)).toBe(1);
+      expect(await dailyCount()).toBe(1);
+      expect(await opRows(job.id)).toEqual([{ kind: "generate", done: true }]);
+      expect(calls()).toBe(1);
+    });
+
     it("refunds the UTC day that was charged", async () => {
       const job = await jobWith();
       const op = uuid();
