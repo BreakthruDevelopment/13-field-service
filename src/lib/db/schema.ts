@@ -452,6 +452,20 @@ export const job = pgTable(
   ],
 );
 
+/** Replay ledger for the admin "Load demo" button: a retry with the same `client_op_id` returns the first result and loads nothing. */
+export const demoLoadOp = pgTable(
+  "demo_load_op",
+  {
+    adminId: text("admin_id")
+      .notNull()
+      .references(() => user.id, { onDelete: "restrict" }),
+    clientOpId: uuid("client_op_id").notNull(),
+    result: jsonb("result").$type<Record<string, number>>(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [primaryKey({ columns: [t.adminId, t.clientOpId] })],
+);
+
 export type User = typeof user.$inferSelect;
 export type Customer = typeof customer.$inferSelect;
 export type Site = typeof site.$inferSelect;

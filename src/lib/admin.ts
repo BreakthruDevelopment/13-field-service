@@ -127,14 +127,32 @@ export async function setUserRole(actor: Actor, input: unknown): Promise<{ user:
 export const DEMO_LOADS_PER_HOUR = 3;
 export const DEMO_LOADS_PER_DAY = 20;
 
+export const demoLoadInput = z.strictObject({
+  /** One id per click (`opFor`): a retry after a lost response returns the first result and reloads nothing. */
+  clientOpId: z.string().uuid().optional(),
+});
+
 /** POST /api/admin/demo: (re)load the demo workspace. Demo users get no password. See `src/lib/demo.ts`. */
-export async function loadDemo(actor: Actor): Promise<DemoSummary> {
+export async function loadDemo(actor: Actor, input: unknown = {}): Promise<DemoSummary & { replayed: boolean }> {
   assertCan(actor, "create", "demo");
-  const summary = await writeTx(actor, async (tx) => {
+  const { clientOpId } = demoLoadInput.parse(input);
+  const out = await writeTx(actor, async (tx) => {
+    const { demoLoadOp } = schema;
+    if (clientOpId) {
+      // The unique key makes a parallel duplicate wait for the first transaction, then see its stored result.
+      const [mine] = await tx.insert(demoLoadOp).values({ adminId: actor.id, clientOpId }).onConflictDoNothing().returning({ clientOpId: demoLoadOp.clientOpId });
+      if (!mine) {
+        const [first] = await tx.select().from(demoLoadOp).where(and(eq(demoLoadOp.adminId, actor.id), eq(demoLoadOp.clientOpId, clientOpId)));
+        if (first?.result) return { summary: first.result as unknown as DemoSummary, replayed: true };
+        throw new ConflictError("That demo load is still running. Try again.");
+      }
+    }
     await consumeRate(tx, actor.id, "demo_load", DEMO_LOADS_PER_HOUR, "The demo was loaded a few times already. Try again later.");
     if (!(await reserveDaily(tx, "demo_load", DEMO_LOADS_PER_DAY))) throw new TooManyRequestsError("The demo has been loaded too many times today.");
-    return loadDemoWorkspace(tx);
+    const summary = await loadDemoWorkspace(tx);
+    if (clientOpId) await tx.update(demoLoadOp).set({ result: summary }).where(and(eq(demoLoadOp.adminId, actor.id), eq(demoLoadOp.clientOpId, clientOpId)));
+    return { summary, replayed: false };
   });
-  log.info("demo.loaded", { actorId: actor.id, ...summary });
-  return summary;
+  if (!out.replayed) log.info("demo.loaded", { actorId: actor.id, ...out.summary });
+  return { ...out.summary, replayed: out.replayed };
 }

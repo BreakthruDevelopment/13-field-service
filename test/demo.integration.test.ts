@@ -43,7 +43,7 @@ describe.skipIf(!testDatabaseUrl)("demo workspace (Postgres)", () => {
 
   it("loads 2 dispatchers, 3 technicians, 8 customers, 12 sites, 60 parts and 15 jobs", async () => {
     const summary = await adminLib.loadDemo(admin);
-    expect(summary).toEqual({ dispatchers: 2, technicians: 3, customers: 8, sites: 12, parts: 60, jobs: 15 });
+    expect(summary).toEqual({ dispatchers: 2, technicians: 3, customers: 8, sites: 12, parts: 60, jobs: 15, replayed: false });
     expect(await count("user", sql`where id like 'demo-fs-%' and role = 'dispatcher'`)).toBe(2);
     expect(await count("user", sql`where id like 'demo-fs-%' and role = 'technician'`)).toBe(3);
     expect(await count("customer", sql`where created_by like 'demo-fs-%'`)).toBe(8);
@@ -102,6 +102,24 @@ describe.skipIf(!testDatabaseUrl)("demo workspace (Postgres)", () => {
     await drizzle(sql, { schema }).transaction((tx) => loadDemoWorkspace(tx, { password: "demo-password-123" }));
     expect(await count("account", sql`where user_id like 'demo-fs-%' and provider_id = 'credential' and password is not null`)).toBe(5);
     await sql`delete from account where user_id like 'demo-fs-%'`;
+  });
+
+  it("a retry with the same clientOpId returns the first result and reloads nothing, even in parallel", async () => {
+    const clientOpId = crypto.randomUUID();
+    const first = await adminLib.loadDemo(admin2, { clientOpId });
+    expect(first.replayed).toBe(false);
+    const ids = async () => (await sql`select id from customer where created_by like 'demo-fs-%' order by id`).map((r) => r.id).join();
+    const before = await ids();
+    const again = await Promise.all([1, 2, 3].map(() => adminLib.loadDemo(admin2, { clientOpId })));
+    expect(again.every((r) => r.replayed && r.jobs === 15)).toBe(true);
+    expect(await ids()).toBe(before); // the customers weren't deleted and recreated
+    expect(await count("demo_load_op", sql`where admin_id = ${admin2.id} and client_op_id = ${clientOpId}`)).toBe(1);
+    // A fresh id loads again; the same id from another admin is that admin's own request.
+    const fresh = await adminLib.loadDemo(admin2, { clientOpId: crypto.randomUUID() });
+    expect(fresh.replayed).toBe(false);
+    expect(await ids()).not.toBe(before);
+    await expect(adminLib.loadDemo(admin2, { clientOpId: "nope" })).rejects.toMatchObject({ name: "ZodError" });
+    await sql`delete from daily_usage where kind = 'demo_load'`;
   });
 
   it("is for admins only, and a dispatcher, technician or user can't load it", async () => {

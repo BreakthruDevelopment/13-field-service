@@ -26,6 +26,10 @@ export function errorInfo(err: unknown): ErrorInfo {
       },
     };
   }
+  // The database picked this request to lose a lock race (deadlock or serialization failure): nothing was changed.
+  if (dbCode(err) === "40P01" || dbCode(err) === "40001") {
+    return { status: 409, body: { error: "That was busy. Try again.", code: "retry" } };
+  }
   if (err instanceof AiError) {
     const status = err.kind === "input_rejected" ? 400 : err.kind === "quota" ? 429 : 502;
     return { status, body: { error: err.message } };
@@ -33,6 +37,16 @@ export function errorInfo(err: unknown): ErrorInfo {
   // Never log `err.message` here: database errors embed the query parameters (emails, note text, keys).
   log.error("request.failed", safeErrorFields(err));
   return { status: 500, body: { error: "Something went wrong" } };
+}
+
+function dbCode(err: unknown): string | undefined {
+  let current: unknown = err;
+  for (let i = 0; i < 5 && current && typeof current === "object"; i++) {
+    const code = (current as { code?: unknown }).code;
+    if (typeof code === "string") return code;
+    current = (current as { cause?: unknown }).cause;
+  }
+  return undefined;
 }
 
 export function errorResponse(err: unknown): Response {

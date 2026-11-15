@@ -164,4 +164,40 @@ describe.skipIf(!testDatabaseUrl)("review fixes (Postgres)", () => {
     expect((await board.listTechnicians(d1)).technicians.map((t) => t.id)).not.toContain(t2.id);
     await sql`update "user" set banned = false where id = ${t2.id}`;
   });
+
+  it("assign and reopen racing a role revocation never deadlock or 500, and leave consistent data", async () => {
+    const outcomes: number[] = [];
+    for (let i = 0; i < 20; i++) {
+      const tech = `${P}-race${i}`;
+      await sql`insert into "user" (id, name, email, role) values (${tech}, ${`race ${i}`}, ${`${tech}@test.local`}, 'technician')`;
+      const kind = i % 3; // 0: assign vs revoke, 1: reopen an on_hold job vs revoke, 2: reopen a completed job vs revoke
+      let job = await newJob(kind === 0 ? {} : { assigneeId: tech, ...window() });
+      if (kind !== 0) {
+        job = await jobs.updateJob(d1, job.id, { op: "status", version: job.version, to: "on_site" });
+        await jobs.addJobNote(d1, job.id, { body: "n" });
+        job = await jobs.updateJob(d1, job.id, { op: "status", version: (await jobs.getJob(d1, job.id)).version, to: kind === 1 ? "on_hold" : "completed" });
+      }
+      const patch = kind === 0 ? { op: "assign" as const, version: job.version, assigneeId: tech, ...window() } : { op: "reopen" as const, version: job.version };
+      const results = await Promise.all([
+        status(jobs.updateJob(d1, job.id, patch)),
+        status(adminLib.setUserRole(admin, { userId: tech, role: "user" })),
+      ]);
+      outcomes.push(...results);
+      for (const r of results) expect([200, 400, 409], `iteration ${i}: ${results}`).toContain(r);
+      // Consistent: nobody who is no longer a technician holds a working job.
+      expect((await sql`select role from "user" where id = ${tech}`)[0].role).toBe("user");
+      expect((await sql`select count(*)::int as n from service_job where assignee_id = ${tech} and status in ('scheduled','en_route','on_site','on_hold')`)[0].n).toBe(0);
+    }
+    expect(outcomes).not.toContain(500);
+  });
+
+  it("maps a database deadlock or serialization failure to a retryable 409", async () => {
+    for (const code of ["40P01", "40001"]) {
+      const err = Object.assign(new Error("Failed query"), { cause: Object.assign(new Error("deadlock detected"), { code }) });
+      const info = errorInfo(err);
+      expect(info.status).toBe(409);
+      expect(info.body).toMatchObject({ code: "retry" });
+      expect(JSON.stringify(info.body)).not.toContain("deadlock");
+    }
+  });
 });

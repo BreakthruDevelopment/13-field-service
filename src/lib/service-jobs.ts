@@ -503,7 +503,17 @@ export async function updateJob(actor: Actor, id: string, input: unknown): Promi
   const jobId = uuid.parse(id);
   const patch = jobPatchInput.parse(input);
   return writeTx(actor, async (tx) => {
+    // Lock order is user -> job everywhere (setUserRole locks the technician, then their jobs). An op that will check a
+    // technician takes that user's row `for share` BEFORE the job row, or the two can deadlock.
+    let techToCheck: string | null = null;
+    if (patch.op === "assign") techToCheck = patch.assigneeId;
+    if (patch.op === "reopen") {
+      const [pre] = await tx.select({ assigneeId: serviceJob.assigneeId }).from(serviceJob).where(and(eq(serviceJob.id, jobId), jobScope(actor)));
+      techToCheck = pre?.assigneeId ?? null;
+    }
+    if (techToCheck) await tx.select({ id: user.id }).from(user).where(eq(user.id, techToCheck)).for("share");
     const job = await lockJob(tx, actor, jobId);
+    if (patch.op === "reopen" && job.assigneeId !== techToCheck) throw new ConflictError("The job changed while reopening. Try again.");
     if (job.version !== patch.version) throw new VersionConflictError(await loadJobDetail(tx, actor, jobId));
     const now = new Date();
     const bump = { version: job.version + 1, updatedAt: now };
