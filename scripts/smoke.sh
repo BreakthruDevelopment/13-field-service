@@ -118,7 +118,7 @@ api "$JAR_N" GET /api/jobs; want 403 "new user listing jobs"
 api "$JAR_N" POST /api/jobs '{"customerId":"'"$(uuid)"'","siteId":"'"$(uuid)"'","title":"x"}'; want 403 "new user creating a job"
 api "$JAR_N" GET /api/parts; want 403 "new user reading parts"
 api "$JAR_N" GET /api/admin/stats; want 403 "new user reading admin counts"
-api "$JAR_N" POST /api/admin/roles '{"userId":"'"$ID_N"'","role":"dispatcher"}'; want 403 "new user granting themselves a role"
+api "$JAR_N" POST /api/admin/roles '{"userId":"'"$ID_N"'","role":"dispatcher","from":"user"}'; want 403 "new user granting themselves a role"
 pass "a new sign-up has no role: 401 signed out, 403 on jobs, parts and admin"
 
 # --- dispatcher: customer, site, job (idempotent) ----------------------------------------------------------------
@@ -248,10 +248,11 @@ if [ "$HAVE_ADMIN" = 1 ]; then
     -d '{"userId":"'"$ID_N"'","role":"dispatcher"}' "$BASE_URL/api/auth/admin/set-role")
   case "$code" in 403|404) ;; *) fail "Better Auth's /admin/set-role must be disabled, got $code" ;; esac
   api "$JAR_N" GET /api/jobs; want 403 "new user after the blocked set-role"
-  api "$JAR_A" POST /api/admin/roles '{"userId":"'"$ID_N"'","role":"technician"}'; want 200 "grant technician"
+  api "$JAR_A" POST /api/admin/roles '{"userId":"'"$ID_N"'","role":"technician","from":"user","clientOpId":"'"$(uuid)"'"}'; want 200 "grant technician"
   api "$JAR_N" GET /api/jobs; want 200 "newly granted technician listing jobs"
-  api "$JAR_A" POST /api/admin/roles '{"userId":"'"$ID_N"'","role":"admin"}'; want 400 "granting admin"
-  api "$JAR_A" POST /api/admin/roles '{"userId":"'"$ID_N"'","role":"user"}'; want 200 "revoke"
+  api "$JAR_A" POST /api/admin/roles '{"userId":"'"$ID_N"'","role":"admin","from":"technician"}'; want 400 "granting admin"
+  api "$JAR_A" POST /api/admin/roles '{"userId":"'"$ID_N"'","role":"user","from":"user"}'; want 409 "revoking with a stale role"
+  api "$JAR_A" POST /api/admin/roles '{"userId":"'"$ID_N"'","role":"user","from":"technician"}'; want 200 "revoke"
   api "$JAR_N" GET /api/jobs; want 403 "revoked technician listing jobs"
   pass "admin: counts only, no job content; roles change only through POST /api/admin/roles (set-role is disabled)"
 else

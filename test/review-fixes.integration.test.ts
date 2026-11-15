@@ -42,7 +42,7 @@ describe.skipIf(!testDatabaseUrl)("review fixes (Postgres)", () => {
     expect(await status(jobs.createJob(d1, { customerId, siteId, title: "x", assigneeId: nul, ...window() }))).toBe(400);
     expect(await status(jobs.updateJob(d1, job.id, { op: "assign", version: job.version, assigneeId: nul }))).toBe(400);
     expect(await status(jobs.listJobs(d1, { assigneeId: nul }))).toBe(400);
-    expect(await status(adminLib.setUserRole(admin, { userId: nul, role: "user" }))).toBe(400);
+    expect(await status(adminLib.setUserRole(admin, { userId: nul, role: "user", from: "user" }))).toBe(400);
     expect(await status(jobs.getJob(d1, nul))).toBe(400);
     expect(await status(jobs.listJobs(d1, { customerId: nul }))).toBe(400);
     expect(await status(customers.getCustomer(d1, nul))).toBe(400);
@@ -180,7 +180,7 @@ describe.skipIf(!testDatabaseUrl)("review fixes (Postgres)", () => {
       const patch = kind === 0 ? { op: "assign" as const, version: job.version, assigneeId: tech, ...window() } : { op: "reopen" as const, version: job.version };
       const results = await Promise.all([
         status(jobs.updateJob(d1, job.id, patch)),
-        status(adminLib.setUserRole(admin, { userId: tech, role: "user" })),
+        status(adminLib.setUserRole(admin, { userId: tech, role: "user", from: "technician" })),
       ]);
       outcomes.push(...results);
       for (const r of results) expect([200, 400, 409], `iteration ${i}: ${results}`).toContain(r);

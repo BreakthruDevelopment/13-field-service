@@ -29,6 +29,7 @@ export async function setup(prefix: string, people: Record<string, Role>) {
 export async function clean(sql: postgres.Sql, prefix: string) {
   const mine = sql`(select id from "user" where id like ${`${prefix}-%`} or email like ${`${prefix}-%@test.local`})`;
   await sql`delete from demo_load_op where admin_id in ${mine}`;
+  await sql`delete from role_change_op where admin_id in ${mine}`;
   await sql`delete from service_job where created_by in ${mine} or assignee_id in ${mine}`;
   await sql`delete from customer where created_by in ${mine}`;
   await sql`delete from part where created_by in ${mine}`;

@@ -43,6 +43,13 @@
       "when": 1794779841970,
       "tag": "0005_demo-load-op",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1794781003216,
+      "tag": "0006_role-change-op",
+      "breakpoints": true
     }
   ]
 }

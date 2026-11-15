@@ -100,7 +100,7 @@ describe.skipIf(!testDatabaseUrl)("access rules (Postgres)", () => {
       await expect(board.getBoard(t1, { date: "2026-11-15" })).rejects.toMatchObject({ status: 403 });
       await expect(parts.createPart(t1, { sku: "TST-ACC-NOPE", name: "x" })).rejects.toMatchObject({ status: 403 });
       await expect(adminLib.getAdminStats(t1)).rejects.toMatchObject({ status: 403 });
-      await expect(adminLib.setUserRole(t1, { userId: t1.id, role: "dispatcher" })).rejects.toMatchObject({ status: 403 });
+      await expect(adminLib.setUserRole(t1, { userId: t1.id, role: "dispatcher", from: "user" })).rejects.toMatchObject({ status: 403 });
       expect((await sql`select role from "user" where id = ${t1.id}`)[0].role).toBe("technician");
     });
 
@@ -140,7 +140,7 @@ describe.skipIf(!testDatabaseUrl)("access rules (Postgres)", () => {
     it("has no admin powers: counts, roles, the user directory and the demo button are refused (403)", async () => {
       await expect(adminLib.getAdminStats(d1)).rejects.toMatchObject({ status: 403 });
       await expect(adminLib.listUsers(d1, {})).rejects.toMatchObject({ status: 403 });
-      await expect(adminLib.setUserRole(d1, { userId: t2.id, role: "dispatcher" })).rejects.toMatchObject({ status: 403 });
+      await expect(adminLib.setUserRole(d1, { userId: t2.id, role: "dispatcher", from: "user" })).rejects.toMatchObject({ status: 403 });
       await expect(adminLib.loadDemo(d1)).rejects.toMatchObject({ status: 403 });
     });
   });
@@ -182,7 +182,7 @@ describe.skipIf(!testDatabaseUrl)("access rules (Postgres)", () => {
       await expect(parts.listParts(plain, {})).rejects.toMatchObject({ status: 403 });
       await expect(board.getBoard(plain, { date: "2026-11-15" })).rejects.toMatchObject({ status: 403 });
       await expect(adminLib.getAdminStats(plain)).rejects.toMatchObject({ status: 403 });
-      await expect(adminLib.setUserRole(plain, { userId: plain.id, role: "dispatcher" })).rejects.toMatchObject({ status: 403 });
+      await expect(adminLib.setUserRole(plain, { userId: plain.id, role: "dispatcher", from: "user" })).rejects.toMatchObject({ status: 403 });
       expect((await sql`select role from "user" where id = ${plain.id}`)[0].role).toBe("user");
     });
   });

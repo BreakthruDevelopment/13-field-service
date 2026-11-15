@@ -6,7 +6,7 @@ import { type Actor, GRANTABLE_ROLES, type Role, ROLES, toRole } from "@/lib/aut
 import { db, schema } from "@/lib/db";
 import { env } from "@/lib/env";
 import { type DemoSummary, loadDemoWorkspace } from "@/lib/demo";
-import { ConflictError, NotFoundError, TooManyRequestsError } from "@/lib/errors";
+import { ConflictError, NotFoundError, TooManyRequestsError, VersionConflictError } from "@/lib/errors";
 import { ACTIVE_STATUSES } from "@/lib/job-status";
 import { log } from "@/lib/log";
 import { idText, text } from "@/lib/text";
@@ -73,23 +73,41 @@ export async function listUsers(actor: Actor, input: unknown): Promise<{ users: 
 
 export const setRoleInput = z.strictObject({
   userId: idText,
+  /** The role to set. */
   role: z.enum(GRANTABLE_ROLES),
+  /** The role the admin saw when they decided. Applied only if the user still has it; otherwise 409 with the current role. */
+  from: z.enum(ROLES),
+  /** One id per click (`opFor`): an exact retry returns the first result, even after someone else changed the role since. */
+  clientOpId: z.string().uuid().optional(),
 });
+
+export type RoleChangeResult = { user: DirectoryUser; unassignedJobs: number };
 
 /**
  * Grant or revoke `technician` / `dispatcher` (or reset to `user`). Admin accounts can't be changed here. Revoking
  * `technician` unassigns that person's open jobs in the same transaction (they go back to the unassigned tray) so no
  * job is stranded with someone who can no longer see it.
  */
-export async function setUserRole(actor: Actor, input: unknown): Promise<{ user: DirectoryUser; unassignedJobs: number }> {
+export async function setUserRole(actor: Actor, input: unknown): Promise<RoleChangeResult & { replayed: boolean }> {
   assertCan(actor, "update", "role");
   const data = setRoleInput.parse(input);
-  const result = await writeTx(actor, async (tx) => {
-    const { user, serviceJob, jobEvent } = schema;
+  const out = await writeTx(actor, async (tx) => {
+    const { user, serviceJob, jobEvent, roleChangeOp } = schema;
+    if (data.clientOpId) {
+      // The unique key makes a parallel duplicate wait for the first transaction, then see its stored result.
+      const [mine] = await tx.insert(roleChangeOp).values({ adminId: actor.id, clientOpId: data.clientOpId }).onConflictDoNothing().returning({ id: roleChangeOp.clientOpId });
+      if (!mine) {
+        const [first] = await tx.select().from(roleChangeOp).where(and(eq(roleChangeOp.adminId, actor.id), eq(roleChangeOp.clientOpId, data.clientOpId)));
+        if (first?.result) return { replayed: true as const, result: first.result as unknown as RoleChangeResult };
+        throw new ConflictError("That role change is still running. Try again.");
+      }
+    }
     const [target] = await tx.select().from(user).where(eq(user.id, data.userId)).for("update");
     if (!target) throw new NotFoundError("User not found");
     const from = toRole(target.role);
     if (from === "admin") throw new ConflictError("Admin accounts can't be changed here.");
+    // Compare-and-set: a retry after someone else changed the role must not silently undo their change.
+    if (from !== data.from) throw new VersionConflictError({ userId: target.id, role: from });
     await tx.update(user).set({ role: data.role, updatedAt: new Date() }).where(eq(user.id, target.id));
 
     let unassigned = 0;
@@ -114,13 +132,15 @@ export async function setUserRole(actor: Actor, input: unknown): Promise<{ user:
       }
       unassigned = open.length;
     }
-    return { from, target, unassigned };
+    const result: RoleChangeResult = {
+      user: { id: target.id, name: target.name, email: target.email, role: data.role, createdAt: target.createdAt.toISOString() },
+      unassignedJobs: unassigned,
+    };
+    if (data.clientOpId) await tx.update(roleChangeOp).set({ result }).where(and(eq(roleChangeOp.adminId, actor.id), eq(roleChangeOp.clientOpId, data.clientOpId)));
+    return { replayed: false as const, result };
   });
-  log.info("role.changed", { actorId: actor.id, userId: result.target.id, from: result.from, to: data.role, unassignedJobs: result.unassigned });
-  return {
-    user: { id: result.target.id, name: result.target.name, email: result.target.email, role: data.role, createdAt: result.target.createdAt.toISOString() },
-    unassignedJobs: result.unassigned,
-  };
+  if (!out.replayed) log.info("role.changed", { actorId: actor.id, userId: out.result.user.id, from: data.from, to: data.role, unassignedJobs: out.result.unassignedJobs });
+  return { ...out.result, replayed: out.replayed };
 }
 
 /** The demo button's caps: 3 loads per admin per hour, 20 app-wide per UTC day. */

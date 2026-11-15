@@ -7,7 +7,9 @@ export const dynamic = "force-dynamic";
 export const maxDuration = 25;
 
 /**
- * POST /api/admin/roles (admin) body { userId, role: "user" | "technician" | "dispatcher" } -> { user, unassignedJobs }
+ * POST /api/admin/roles (admin) body { userId, role: "user" | "technician" | "dispatcher", from: <the role the admin saw>, clientOpId? }
+ * -> { user, unassignedJobs, replayed }. Applied only if the user's role still equals `from`; otherwise 409 { error, current: { userId, role } }.
+ * An exact retry with the same clientOpId returns the first result (replayed: true) and changes nothing.
  * The only way a role changes. Admin accounts can't be changed (409). Revoking technician unassigns their open jobs.
  */
 export async function POST(request: Request) {

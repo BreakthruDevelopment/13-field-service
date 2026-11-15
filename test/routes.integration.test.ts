@@ -135,7 +135,7 @@ describe.skipIf(!testDatabaseUrl)("API routes (Better Auth + Postgres)", () => {
         ["parts", call("newbie", partsRoute.GET, "GET", "/api/parts")],
         ["board", call("newbie", boardRoute.GET, "GET", "/api/board?date=2026-11-15")],
         ["stats", call("newbie", statsRoute.GET, "GET", "/api/admin/stats")],
-        ["roles", call("newbie", rolesRoute.POST, "POST", "/api/admin/roles", { userId: ids.newbie, role: "dispatcher" })],
+        ["roles", call("newbie", rolesRoute.POST, "POST", "/api/admin/roles", { userId: ids.newbie, role: "dispatcher", from: "user" })],
       ];
       for (const [name, p] of probes) expect((await p).status, name).toBe(403);
       expect(await roleOf("newbie")).toBe("user");
@@ -166,24 +166,57 @@ describe.skipIf(!testDatabaseUrl)("API routes (Better Auth + Postgres)", () => {
 
   describe("POST /api/admin/roles", () => {
     it("grants and revokes roles for admins only, takes effect at once, and refuses `admin` and admin targets", async () => {
-      const grant = (userId: string, role: string, who = "admin", opts = {}) => call(who, rolesRoute.POST, "POST", "/api/admin/roles", { userId, role }, opts);
-      expect((await grant(ids.newbie, "technician", "disp")).status).toBe(403);
-      expect((await grant(ids.newbie, "technician", "admin", { origin: "https://evil.example" })).status).toBe(403);
-      expect((await grant(ids.newbie, "technician", "admin", { origin: null })).status).toBe(403);
+      const grant = (userId: string, role: string, from: string, who = "admin", opts = {}) => call(who, rolesRoute.POST, "POST", "/api/admin/roles", { userId, role, from }, opts);
+      expect((await grant(ids.newbie, "technician", "user", "disp")).status).toBe(403);
+      expect((await grant(ids.newbie, "technician", "user", "admin", { origin: "https://evil.example" })).status).toBe(403);
+      expect((await grant(ids.newbie, "technician", "user", "admin", { origin: null })).status).toBe(403);
       expect(await roleOf("newbie")).toBe("user");
 
       expect((await call("newbie", jobsRoute.GET, "GET", "/api/jobs")).status).toBe(403);
-      const ok = await grant(ids.newbie, "technician");
+      const ok = await grant(ids.newbie, "technician", "user");
       expect(ok.status).toBe(200);
       expect(ok.json).toMatchObject({ user: { id: ids.newbie, role: "technician" }, unassignedJobs: 0 });
       expect((await call("newbie", jobsRoute.GET, "GET", "/api/jobs")).status).toBe(200);
 
-      expect((await grant(ids.newbie, "admin")).status).toBe(400);
-      expect((await grant(ids.newbie, "superuser")).status).toBe(400);
-      expect((await grant(ids.admin, "user")).status).toBe(409);
-      expect((await grant("nobody", "user")).status).toBe(404);
-      expect((await call("admin", rolesRoute.POST, "POST", "/api/admin/roles", { userId: ids.newbie, role: "user", extra: 1 })).status).toBe(400);
+      expect((await grant(ids.newbie, "admin", "technician")).status).toBe(400);
+      expect((await grant(ids.newbie, "superuser", "technician")).status).toBe(400);
+      expect((await grant(ids.admin, "user", "admin")).status).toBe(409);
+      expect((await grant("nobody", "user", "user")).status).toBe(404);
+      expect((await call("admin", rolesRoute.POST, "POST", "/api/admin/roles", { userId: ids.newbie, role: "user", from: "technician", extra: 1 })).status).toBe(400);
       expect(await roleOf("admin")).toBe("admin");
+    });
+
+    it("applies only if the role still equals `from`: a stale retry after a concurrent change is a 409 and changes nothing", async () => {
+      const post = (body: object) => call("admin", rolesRoute.POST, "POST", "/api/admin/roles", body);
+      await sql`update "user" set role = 'user' where id = ${ids.newbie}`;
+      const clientOpId = uuid();
+      const first = await post({ userId: ids.newbie, role: "technician", from: "user", clientOpId });
+      expect(first.status).toBe(200);
+      expect(first.json.replayed).toBe(false);
+      // Another admin revokes while the first response is lost...
+      await sql`update "user" set role = 'user' where id = ${ids.newbie}`;
+      // ...an exact replay returns the first result and does NOT restore access.
+      const replay = await post({ userId: ids.newbie, role: "technician", from: "user", clientOpId });
+      expect(replay.status).toBe(200);
+      expect(replay.json).toMatchObject({ replayed: true, user: { id: ids.newbie, role: "technician" } });
+      expect(await roleOf("newbie")).toBe("user");
+      // A fresh retry (no op id, or a new one) with the stale `from` is refused with the current role.
+      for (const extra of [{}, { clientOpId: uuid() }]) {
+        await sql`update "user" set role = 'dispatcher' where id = ${ids.newbie}`;
+        const stale = await post({ userId: ids.newbie, role: "technician", from: "user", ...extra });
+        expect(stale.status).toBe(409);
+        expect(stale.json.current).toEqual({ userId: ids.newbie, role: "dispatcher" });
+        expect(await roleOf("newbie")).toBe("dispatcher");
+      }
+      expect((await post({ userId: ids.newbie, role: "technician" })).status).toBe(400); // `from` is required
+      // The replay ledger: one row per op id, and parallel duplicates make one change.
+      const par = uuid();
+      await sql`update "user" set role = 'user' where id = ${ids.newbie}`;
+      const rs = await Promise.all([1, 2, 3].map(() => post({ userId: ids.newbie, role: "technician", from: "user", clientOpId: par })));
+      expect(rs.every((r) => r.status === 200)).toBe(true);
+      expect(rs.filter((r) => r.json.replayed === false)).toHaveLength(1);
+      expect((await sql`select count(*)::int as n from role_change_op where client_op_id = ${par}`)[0].n).toBe(1);
+      await sql`update "user" set role = 'user' where id = ${ids.newbie}`;
     });
 
     it("revoking technician returns their open jobs to the unassigned tray in the same step", async () => {
@@ -191,7 +224,7 @@ describe.skipIf(!testDatabaseUrl)("API routes (Better Auth + Postgres)", () => {
       const mk = async () => (await call("disp", jobsRoute.POST, "POST", "/api/jobs", { customerId, siteId, title: "To be freed", assigneeId: ids.newbie, ...window() })).json.job;
       const a = await mk();
       const b = await mk();
-      expect((await call("admin", rolesRoute.POST, "POST", "/api/admin/roles", { userId: ids.newbie, role: "user" })).json).toMatchObject({ unassignedJobs: 2 });
+      expect((await call("admin", rolesRoute.POST, "POST", "/api/admin/roles", { userId: ids.newbie, role: "user", from: "technician" })).json).toMatchObject({ unassignedJobs: 2 });
       for (const j of [a, b]) {
         const after = (await call("disp", jobRoute.GET, "GET", `/api/jobs/${j.id}`, undefined, { ctx: idCtx(j.id) })).json.job;
         expect(after).toMatchObject({ status: "unassigned", assignee: null, version: j.version + 1, statusVersion: j.statusVersion + 1 });
