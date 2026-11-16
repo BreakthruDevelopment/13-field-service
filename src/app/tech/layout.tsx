@@ -1,5 +1,4 @@
 import type { ReactNode } from "react";
-import { E2eOfflineHarness } from "@/components/e2e-offline-harness";
 import { ServiceWorkerRegister } from "@/components/service-worker-register";
 import { requireRoleOrRedirect } from "@/lib/auth/session";
 import { TechDataProvider } from "@/lib/offline/use-tech-data";
@@ -15,8 +14,6 @@ export default async function TechLayout({ children }: { children: ReactNode }) 
   return (
     <TechDataProvider userId={user.id}>
       <ServiceWorkerRegister />
-      {/* Only for the scripted browser run (scripts/e2e-offline.mjs); never set in production. */}
-      {process.env.E2E_OFFLINE === "1" ? <E2eOfflineHarness /> : null}
       {children}
     </TechDataProvider>
   );

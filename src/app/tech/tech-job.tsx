@@ -88,7 +88,10 @@ export function TechJobView({ job, units, online }: { job: TechJob; units: reado
   return (
     <article className="min-w-0 pb-44 sm:pb-0 [&_button]:scroll-mb-48 [&_input]:scroll-mb-48 [&_select]:scroll-mb-48 [&_textarea]:scroll-mb-48 sm:[&_button]:scroll-mb-0 sm:[&_input]:scroll-mb-0 sm:[&_select]:scroll-mb-0 sm:[&_textarea]:scroll-mb-0">
       <div className="mb-6 flex flex-wrap items-center gap-2">
-        <StatusBadge status={status.status} label={status.label} />
+        {/* data-testid: the status the technician sees for this job. scripts/e2e-offline.mjs drives this real screen. */}
+        <span data-testid="job-status">
+          <StatusBadge status={status.status} label={status.label} />
+        </span>
         {priority ? (
           <StatusBadge status={priority.status} label={priority.label} />
         ) : (
@@ -191,7 +194,7 @@ export function TechJobView({ job, units, online }: { job: TechJob; units: reado
         {job.notes.length === 0 ? (
           <p className="mb-4 text-sm text-muted">No notes yet.</p>
         ) : (
-          <ul className="mb-4 space-y-3">
+          <ul data-testid="job-notes" className="mb-4 space-y-3">
             {job.notes.map((item) => (
               <li key={item.id} className="min-w-0 border-b border-border pb-3 last:border-0">
                 <p className={userTextClass}>{item.body}</p>

@@ -228,7 +228,10 @@ export function TechHome({ units }: { units: readonly string[] }) {
         description={job ? undefined : "Notes, status and check-ins stay on this phone when you have no signal."}
         actions={
           <>
-            <StatusBadge status={chip.tone} label={chip.label} />
+            {/* data-testid: the sync chip the technician reads. scripts/e2e-offline.mjs drives these real screens. */}
+            <span data-testid="sync-chip">
+              <StatusBadge status={chip.tone} label={chip.label} />
+            </span>
             {offlineReady && <StatusBadge status="live" label="Available offline" />}
             {canSync && (
               <button type="button" className={buttonSecondary} disabled={syncNow.pending} onClick={() => void syncNow.run()}>

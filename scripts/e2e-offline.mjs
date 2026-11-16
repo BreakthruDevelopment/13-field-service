@@ -5,9 +5,15 @@
 //   -> exactly one successful /api/sync with the three ops -> sign out leaves no fsd-* database, no cache, no registry.
 //   Then: a different user signing in on the same device deletes the previous user's database.
 //
-// Needs the app built and running with E2E_OFFLINE=1 (it adds a bare test screen to /tech), `psql` and DATABASE_URL to
-// grant roles, and Chrome (CHROME_PATH, default /usr/bin/google-chrome):
-//   E2E_OFFLINE=1 PORT=3137 HOSTNAME=127.0.0.1 node .next/standalone/server.js &
+// It drives the technician's real screens (`/tech` and `/tech?job=…`, 13.6) through their labels and buttons: the note
+// box, "En route", "Check in at site", the sync chip, the notes list. There is no test-only screen to drive instead —
+// a parallel surface can stay green while the product is broken, so gutting `addNote` or `setStatus` in
+// `src/app/tech/tech-job.tsx` must turn this run red. The few `data-testid`s it reads (`sync-chip`, `job-status`,
+// `job-notes`) are on the elements the technician actually reads.
+//
+// Needs the app built and running, `psql` and DATABASE_URL to grant roles, and Chrome (CHROME_PATH, default
+// /usr/bin/google-chrome):
+//   PORT=3137 HOSTNAME=127.0.0.1 node .next/standalone/server.js &
 //   BASE_URL=http://localhost:3137 DATABASE_URL=... node scripts/e2e-offline.mjs
 import { execFileSync } from "node:child_process";
 import { chromium } from "playwright-core";
@@ -80,19 +86,37 @@ try {
   const context = await browser.newContext({ permissions: ["geolocation"], geolocation: { latitude: 30.26721999, longitude: -97.74309999, accuracy: 20 }, viewport: { width: 375, height: 700 } });
   await signIn(context, EMAILS.t1);
   const page = await context.newPage();
-  // 13.6 renders the real screens on the same page. Drive the harness, not those buttons.
-  const harness = page.getByRole("region", { name: "offline e2e harness" });
   const syncResponses = [];
+  const pageErrors = [];
   page.on("response", (r) => {
     if (r.url().endsWith("/api/sync") && r.request().method() === "POST") syncResponses.push(r);
   });
-  const text = (id) => harness.getByTestId(id).innerText();
-  const waitText = (id, expected, timeout = 20_000) => page.waitForFunction(([i, e]) => document.querySelector(`[data-testid="${i}"]`)?.textContent === e, [id, expected], { timeout });
+  page.on("pageerror", (err) => pageErrors.push(String(err)));
+
+  // The real screens, by what the technician sees and taps.
+  const TITLE = `E2E sink ${RUN}`;
+  const jobCard = () => page.getByRole("link", { name: new RegExp(`E2E sink ${RUN}`) });
+  const jobHeading = () => page.getByRole("heading", { name: TITLE });
+  const noteBox = () => page.getByLabel("Note", { exact: true });
+  const tap = (name) => page.getByRole("button", { name, exact: true }).click();
+  const text = (id) => page.getByTestId(id).innerText().then((value) => value.trim());
+  const waitText = async (id, expected, timeout = 20_000) => {
+    try {
+      await page.waitForFunction(
+        ([i, e]) => document.querySelector(`[data-testid="${i}"]`)?.textContent?.trim() === e,
+        [id, expected],
+        { timeout },
+      );
+    } catch {
+      const seen = await text(id).catch(() => "<not on the page>");
+      fail(`${id} should read "${expected}", the screen shows "${seen}"`);
+    }
+  };
 
   await page.goto(`${BASE}/tech`);
-  await waitText("ready", "ready");
-  await harness.getByTestId("job-title").waitFor();
-  ok("online: the harness shows the technician's job from the snapshot");
+  // My jobs draws the card from the snapshot the phone downloaded, not from the HTML.
+  await jobCard().waitFor({ timeout: 30_000 });
+  ok("online: My jobs shows the technician's job from the snapshot");
   // First visit, no second online navigation: the page hands the worker its file list and the worker saves the shell.
   await page.waitForFunction(() => document.documentElement.dataset.offlineReady === "1", null, { timeout: 30_000 });
   const cached = await page.evaluate(async () => {
@@ -106,30 +130,39 @@ try {
   if (!paths.some((p) => p.startsWith("/_next/static/"))) fail(`static chunks should be cached: ${JSON.stringify(cached)}`);
   ok("service worker active: the /tech shell and static chunks are cached, nothing from /api");
 
+  // Open the job the way a technician does: tap the card.
+  await jobCard().click();
+  await jobHeading().waitFor({ timeout: 20_000 });
+  await noteBox().waitFor();
+
   await context.setOffline(true);
   await page.reload();
-  await waitText("ready", "ready");
-  if ((await text("job-title")) !== `E2E sink ${RUN}`) fail("offline reload should show the saved job");
+  await jobHeading().waitFor({ timeout: 30_000 });
+  if ((await text("job-status")) !== "Scheduled") fail("offline reload should show the saved job as Scheduled");
   ok("offline: reload is served from the cache and shows the saved job");
 
-  await harness.getByLabel("note").fill("Offline note: replaced the cartridge.");
-  await harness.getByRole("button", { name: "Add note" }).click();
-  await harness.getByRole("button", { name: "En route" }).click();
-  await waitText("pending", "2");
-  await harness.getByRole("button", { name: "Check in at site" }).click();
-  await waitText("pending", "3");
-  if ((await text("job-status")) !== "on_site") fail("the screen should show on_site while offline");
+  await noteBox().fill("Offline note: replaced the cartridge.");
+  await tap("Add note");
+  await tap("En route");
+  await waitText("sync-chip", "Offline · 2 changes waiting");
+  await tap("Check in at site");
+  await waitText("sync-chip", "Offline · 3 changes waiting");
+  if ((await text("job-status")) !== "On site") fail("the job page should show On site while offline");
+  if (!(await text("job-notes")).includes("Offline note")) fail("the queued note should be on the job page");
+  if (!(await text("job-notes")).includes("Waiting to sync")) fail("a queued note must say it is waiting to sync");
   await sleep(2500); // the 2 s debounce fires and fails: ops must stay
-  if ((await text("pending")) !== "3") fail("ops must stay queued while offline");
+  if ((await text("sync-chip")) !== "Offline · 3 changes waiting") fail("ops must stay queued while offline");
   await page.reload();
-  await waitText("ready", "ready");
-  await waitText("pending", "3");
+  await jobHeading().waitFor({ timeout: 30_000 });
+  await waitText("sync-chip", "Offline · 3 changes waiting");
+  if ((await text("job-status")) !== "On site") fail("the offline status change should survive a reload");
   if (!(await text("job-notes")).includes("Offline note")) fail("the queued note should survive a reload");
-  ok("offline: a note, En route and a geolocated check-in queue and survive a reload");
+  ok("offline: a note, En route and a geolocated check-in queue on the job page and survive a reload");
 
   const before = syncResponses.length;
   await context.setOffline(false);
-  await waitText("pending", "0", 30_000);
+  await waitText("sync-chip", "Up to date", 30_000);
+  if ((await text("job-notes")).includes("Waiting to sync")) fail("a synced note must stop saying it is waiting");
   await sleep(1500);
   const okSyncs = [];
   for (const r of syncResponses.slice(before)) if (r.status() === 200) okSyncs.push(await r.json());
@@ -158,16 +191,17 @@ try {
 
   // A different user on the same device: the previous user's database is deleted before anything renders.
   await signIn(context, EMAILS.t1);
-  await page.goto(`${BASE}/tech`);
-  await waitText("ready", "ready");
-  await harness.getByLabel("note").fill("left on the phone");
-  await harness.getByRole("button", { name: "Add note" }).click().catch(() => undefined);
+  await page.goto(`${BASE}/tech?job=${encodeURIComponent(jobId)}`);
+  await noteBox().waitFor({ timeout: 30_000 });
+  await noteBox().fill("left on the phone");
+  await tap("Add note").catch(() => undefined);
   const mine = await page.evaluate(async () => (await indexedDB.databases()).map((d) => d.name));
   if (!mine.some((n) => n?.startsWith("fsd-"))) fail(`technician 1 should have a database: ${mine}`);
   await context.clearCookies(); // the session ended without a sign-out, and someone else signs in
   await signIn(context, EMAILS.t2);
   await page.goto(`${BASE}/tech`);
-  await waitText("ready", "ready");
+  // Technician 2 has no jobs: My jobs says so once the phone has been read.
+  await page.getByText("No jobs on this phone yet").waitFor({ timeout: 30_000 });
   const dbs = await page.evaluate(async () => (await indexedDB.databases()).map((d) => d.name).filter((n) => n?.startsWith("fsd-")));
   if (dbs.length !== 1 || !dbs[0].includes(encodeURIComponent(t2Id))) fail(`only technician 2's database should remain: ${dbs}`);
   ok("another technician on the same phone: the previous user's database is gone, only their own remains");
@@ -213,6 +247,7 @@ try {
   ok("unfinished sign-out: a second tab opens no database, downloads no snapshot and warms no cache; the device ends wiped");
   await second.close();
 
+  if (pageErrors.length) fail(`the technician screens threw: ${pageErrors.join(" | ")}`);
   console.log("E2E PASS");
 } finally {
   await browser.close();
