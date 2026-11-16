@@ -197,6 +197,38 @@ api "$JAR_T1" POST "/api/jobs/$JOB/notes" '{"body":"Replaced the cartridge.","op
 [ "$(jqr '.job.notes | length')" = "1" ] || fail "a replayed note op id must leave one note: $BODY"
 pass "a replayed note op id left one note"
 
+# --- AI work order (13.3): draft, replay, isolation, submit, approve ---------------------------------------------
+
+OP_W=$(uuid); DRAFT_BODY='{"clientOpId":"'"$OP_W"'","baseVersion":null}'
+api "$JAR_T1" GET "/api/jobs/$JOB/work-order"; want 200 "reading the work order before there is one"
+[ "$(jqr .workOrder)" = "null" ] || fail "a job without a work order should answer null: $BODY"
+api "$JAR_T1" POST "/api/jobs/$JOB/work-order/draft" "$DRAFT_BODY"; want 200 "technician 1 drafting a work order"
+WO=$(jqr .workOrder.id); WOV=$(jqr .workOrder.version)
+[ "$(jqr .replayed)" = "false" ] && [ "$(jqr .workOrder.status)" = "draft" ] || fail "the first draft should be a new draft: $BODY"
+jq -e '.workOrder.lines | all(.partId != null or (.flags | index("unknown_part") != null))' <<<"$BODY" >/dev/null || fail "every line must be a catalog part or flagged unknown_part: $BODY"
+api "$JAR_T1" POST "/api/jobs/$JOB/work-order/draft" "$DRAFT_BODY"; want 200 "replayed draft"
+[ "$(jqr .replayed)" = "true" ] && [ "$(jqr .workOrder.id)" = "$WO" ] && [ "$(jqr .workOrder.version)" = "$WOV" ] || fail "a replayed draft must return the first result: $BODY"
+api "$JAR_T1" POST "/api/jobs/$JOB/work-order/draft" '{"clientOpId":"'"$OP_W"'","baseVersion":1}'; want 409 "the same op id with another payload"
+api "$JAR_T1" POST "/api/jobs/$JOB/work-order/draft" '{"clientOpId":"'"$(uuid)"'","baseVersion":null}'; want 409 "a stale baseVersion"
+api "$JAR_T1" POST "/api/jobs/$JOB/work-order/draft" '{"baseVersion":null}'; want 400 "a draft without an op id"
+api "$JAR_N" POST "/api/jobs/$JOB/work-order/draft" "$DRAFT_BODY"; want 403 "new user drafting"
+if [ "$HAVE_T2" = 1 ]; then
+  api "$JAR_T2" POST "/api/jobs/$JOB/work-order/draft" '{"clientOpId":"'"$(uuid)"'","baseVersion":null}'; want 404 "technician 2 drafting on technician 1's job"
+  api "$JAR_T2" GET "/api/jobs/$JOB/work-order"; want 404 "technician 2 reading technician 1's work order"
+fi
+api "$JAR_T1" PATCH "/api/jobs/$JOB/work-order" '{"op":"approve","clientOpId":"'"$(uuid)"'","version":'"$WOV"'}'; want 403 "technician approving"
+OP_SUB=$(uuid)
+api "$JAR_T1" PATCH "/api/jobs/$JOB/work-order" '{"op":"submit","clientOpId":"'"$OP_SUB"'","version":'"$WOV"'}'; want 200 "technician submitting"
+[ "$(jqr .workOrder.status)" = "submitted" ] || fail "the work order should be submitted: $BODY"
+api "$JAR_T1" PATCH "/api/jobs/$JOB/work-order" '{"op":"submit","clientOpId":"'"$OP_SUB"'","version":'"$WOV"'}'; want 200 "replayed submit"
+[ "$(jqr .replayed)" = "true" ] || fail "a replayed submit must say so: $BODY"
+WOV=$(jqr .workOrder.version)
+api "$JAR_T1" PATCH "/api/jobs/$JOB/work-order" '{"op":"edit","clientOpId":"'"$(uuid)"'","version":'"$WOV"',"summary":"sneaky"}'; want 409 "editing a submitted order"
+api "$JAR_D" PATCH "/api/jobs/$JOB/work-order" '{"op":"approve","clientOpId":"'"$(uuid)"'","version":'"$((WOV - 1))"'}'; want 409 "approving with a stale version"
+api "$JAR_D" PATCH "/api/jobs/$JOB/work-order" '{"op":"approve","clientOpId":"'"$(uuid)"'","version":'"$WOV"'}'; want 200 "dispatcher approving"
+[ "$(jqr .workOrder.status)" = "approved" ] || fail "the work order should be approved: $BODY"
+pass "AI work order: drafted and replayed once, checked lines, isolated per technician, submitted by the technician and approved by the dispatcher"
+
 # --- dispatcher: versions, schedule, status, reassign ------------------------------------------------------------
 
 api "$JAR_D" GET "/api/jobs/$JOB"; want 200 "dispatcher reading the job"

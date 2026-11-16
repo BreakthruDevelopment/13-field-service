@@ -8,7 +8,7 @@ const admin = { id: "a1", role: "admin" as const };
 const user = { id: "u1", role: "user" as const };
 
 const RESOURCES: Resource[] = ["customer", "site", "job", "job_note", "job_event", "part", "board", "work_order", "stats", "user_directory", "role", "demo"];
-const ACTIONS: Action[] = ["read", "create", "update", "delete"];
+const ACTIONS: Action[] = ["read", "create", "update", "delete", "submit", "approve"];
 const allowed = (actor: Parameters<typeof can>[0], row?: { assigneeId: string | null }) =>
   RESOURCES.flatMap((r) => ACTIONS.filter((a) => can(actor, a, r, row)).map((a) => `${r}:${a}`));
 
@@ -47,6 +47,17 @@ describe("access rules", () => {
     expect(can(tech, "create", "job_note", { assigneeId: "t1" })).toBe(true);
     expect(can(tech, "create", "job_note", { assigneeId: "t2" })).toBe(false);
     expect(can(tech, "update", "work_order", { assigneeId: "t2" })).toBe(false);
+  });
+
+  it("work orders: the technician submits their own, a dispatcher approves, and neither holds the other's step", () => {
+    const own = { assigneeId: "t1" };
+    for (const a of ["read", "create", "update", "submit"] as const) expect(can(tech, a, "work_order", own)).toBe(true);
+    expect(can(tech, "approve", "work_order", own)).toBe(false);
+    expect(can(tech, "submit", "work_order", { assigneeId: "t2" })).toBe(false);
+    expect(can(tech, "create", "work_order", { assigneeId: null })).toBe(false);
+    for (const a of ["read", "create", "update", "approve"] as const) expect(can(dispatcher, a, "work_order")).toBe(true);
+    expect(can(dispatcher, "submit", "work_order")).toBe(false);
+    for (const a of ACTIONS) expect(can(admin, a, "work_order")).toBe(false);
   });
 
   it("assertCan throws ForbiddenError (403)", () => {
