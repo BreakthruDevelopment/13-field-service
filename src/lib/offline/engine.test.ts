@@ -141,8 +141,9 @@ describe("flushing", () => {
     await engine.flush();
     expect(engine.getState().pending).toBe(1);
     expect(r.timers.filter((t) => !t.cleared).at(-1)!.ms).toBeGreaterThanOrEqual(120_000);
-    // The retry timer fires and sends the same op again.
+    // The retry timer fires at the deadline and sends the same op again.
     const before = sentOps(r)[0].opId;
+    r.clock.t += 120_001;
     r.timers.filter((t) => !t.cleared).at(-1)!.fn();
     await vi.waitFor(() => expect(syncCalls(r)).toBe(2));
     expect(sentOps(r, 1)[0].opId).toBe(before);
@@ -154,12 +155,14 @@ describe("flushing", () => {
     await engine.addNote(J, "x");
     const waits: number[] = [];
     for (let i = 0; i < 4; i++) {
+      r.clock.t += 10 * 60_000; // past each deadline
       await engine.flush();
       waits.push(r.timers.filter((t) => !t.cleared).at(-1)!.ms);
     }
     expect(waits).toEqual([...waits].sort((a, b) => a - b));
     expect(waits[3]).toBeGreaterThan(waits[0]);
     ok = true;
+    r.clock.t += 10 * 60_000;
     await engine.flush();
     expect(engine.getState().pending).toBe(0);
   });
@@ -473,5 +476,56 @@ describe("overlapping taps", () => {
     expect(results.map((x) => x.status)).toEqual(["rejected", "fulfilled", "fulfilled", "fulfilled"]);
     await engine.flush();
     expect(sentOps(r).map((o) => (o.kind === "note.add" ? o.body : o.to))).toEqual(["first", "second", "en_route"]);
+  });
+});
+
+
+describe("the backoff deadline", () => {
+  const limited = () => started((url, init) => (url === "/api/sync" ? reply(429, { error: "slow" }, { "retry-after": "120" }) : happy()(url, init)));
+
+  it("automatic flushes (the 60 s tick, the visibility event) stay quiet until the Retry-After deadline; a forced one doesn't", async () => {
+    const { engine, r } = await limited();
+    await engine.addNote(J, "x");
+    await engine.flush();
+    expect(syncCalls(r)).toBe(1);
+    r.clock.t += 60_000;
+    await engine.flush();
+    expect(syncCalls(r)).toBe(1);
+    r.clock.t += 61_000;
+    await engine.flush();
+    expect(syncCalls(r)).toBe(2);
+    await engine.flush({ force: true });
+    expect(syncCalls(r)).toBe(3);
+  });
+
+  it("work queued during a backoff doesn't pull the retry forward", async () => {
+    const { engine, r } = await limited();
+    await engine.addNote(J, "x");
+    await engine.flush();
+    const deadline = engine.getState().nextRetryAt!;
+    await engine.addNote(J, "y");
+    const live = r.timers.filter((t) => !t.cleared).at(-1)!;
+    expect(r.clock.t + live.ms).toBeGreaterThanOrEqual(deadline);
+  });
+
+  it("coming back online ends a network-error backoff at once, but not a 429's", async () => {
+    let offline = true;
+    const { engine, r } = await started((url, init) => {
+      if (offline) throw new TypeError("offline");
+      return happy()(url, init);
+    });
+    await engine.addNote(J, "x");
+    await engine.flush();
+    expect(engine.getState().status).toBe("backoff");
+    offline = false;
+    await engine.connectivityRestored();
+    expect(engine.getState().pending).toBe(0);
+
+    const limitedRig = await limited();
+    await limitedRig.engine.addNote(J, "x");
+    await limitedRig.engine.flush();
+    await limitedRig.engine.connectivityRestored();
+    expect(syncCalls(limitedRig.r)).toBe(1);
+    void r;
   });
 });

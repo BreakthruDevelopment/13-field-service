@@ -96,6 +96,8 @@ export class TechDataEngine {
   private attempts = 0;
   private flushing: Promise<void> | null = null;
   private halted = false;
+  /** Why the current backoff started: a network error ends when the browser says it is online again; a server answer (429, 5xx) doesn't. */
+  private backoffKind: "network" | "server" | null = null;
   /** Which refresh may still write: only the newest one started. */
   private refreshSeq = 0;
   /** Bumped whenever acknowledged ops are folded into the snapshot; a GET that began before that read older state. */
@@ -239,17 +241,31 @@ export class TechDataEngine {
 
   scheduleFlush(ms: number) {
     if (this.halted) return;
+    // Work queued during a backoff waits for the deadline: a 2 s debounce must not undo a 2-minute Retry-After.
+    const { status, nextRetryAt } = this.state;
+    const wait = status === "backoff" && nextRetryAt !== null ? Math.max(ms, nextRetryAt - this.env.now()) : ms;
     if (this.timer !== null) this.env.clearTimer(this.timer);
     this.timer = this.env.setTimer(() => {
       this.timer = null;
       void this.flush().catch(() => undefined);
-    }, ms);
+    }, wait);
   }
 
-  /** Send the outbox. Safe to call any time; one flush runs at a time. `force` retries even after a 401 or 403. */
+  /** The browser says the network is back: a backoff that was only a network error ends now (a 429 or 5xx keeps its deadline). */
+  connectivityRestored(): Promise<void> {
+    if (this.state.status === "backoff" && this.backoffKind === "network") this.set({ nextRetryAt: null });
+    void this.refresh();
+    return this.flush();
+  }
+
+  /**
+   * Send the outbox. Safe to call any time; one flush runs at a time. Automatic callers (timers, events) respect the
+   * backoff deadline and stay quiet after a 401 or 403; `force` (the technician's "sync now") doesn't.
+   */
   flush(opts: { force?: boolean } = {}): Promise<void> {
     if (this.halted) return Promise.resolve();
     if (!opts.force && (this.state.status === "signed_out" || this.state.status === "forbidden")) return Promise.resolve();
+    if (!opts.force && this.state.status === "backoff" && this.state.nextRetryAt !== null && this.env.now() < this.state.nextRetryAt) return Promise.resolve();
     if (this.flushing) return this.flushing;
     const run = async () => {
       try {
@@ -269,7 +285,8 @@ export class TechDataEngine {
     return this.flushing;
   }
 
-  private backoff(retryAfter: number | null = null) {
+  private backoff(retryAfter: number | null = null, kind: "network" | "server" = "server") {
+    this.backoffKind = kind;
     this.attempts += 1;
     const wait = Math.max(backoffMs(this.attempts - 1, this.env.random), retryAfter ?? 0);
     this.set({ status: "backoff", nextRetryAt: this.env.now() + wait });
@@ -299,7 +316,7 @@ export class TechDataEngine {
           body: JSON.stringify({ ownerId: this.userId, ops: batch.map((q) => q.op) }),
         });
       } catch {
-        this.backoff();
+        this.backoff(null, "network");
         return;
       }
       if (this.halted) return;

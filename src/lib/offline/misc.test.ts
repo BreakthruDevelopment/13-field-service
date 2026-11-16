@@ -77,21 +77,23 @@ describe("triggers", () => {
     await engine.load();
     const flush = vi.spyOn(engine, "flush");
     const refresh = vi.spyOn(engine, "refresh");
+    const restored = vi.spyOn(engine, "connectivityRestored");
     const listeners: Record<string, () => void> = {};
     const doc = { visibilityState: "hidden", addEventListener: (n: string, f: () => void) => void (listeners[n] = f), removeEventListener: (n: string) => void delete listeners[n] };
     const win = { addEventListener: (n: string, f: () => void) => void (listeners[n] = f), removeEventListener: (n: string) => void delete listeners[n] };
     let tick: () => void = () => undefined;
     const detach = attachTriggers(engine, { window: win as never, document: doc as never, setInterval: (fn) => ((tick = fn), 1), clearInterval: () => undefined });
     listeners.online();
-    expect(flush).toHaveBeenCalledTimes(1);
-    expect(refresh).toHaveBeenCalledTimes(1);
+    expect(restored).toHaveBeenCalledTimes(1); // which flushes and refreshes
+    const afterOnline = flush.mock.calls.length;
     listeners.visibilitychange(); // still hidden
-    expect(flush).toHaveBeenCalledTimes(1);
+    expect(flush).toHaveBeenCalledTimes(afterOnline);
     doc.visibilityState = "visible";
     listeners.visibilitychange();
-    expect(flush).toHaveBeenCalledTimes(2);
+    expect(flush).toHaveBeenCalledTimes(afterOnline + 1);
+    expect(refresh).toHaveBeenCalled();
     tick(); // nothing pending
-    expect(flush).toHaveBeenCalledTimes(2);
+    expect(flush).toHaveBeenCalledTimes(afterOnline + 1);
     detach();
     expect(Object.keys(listeners)).toEqual([]);
     void snapshotFor;
