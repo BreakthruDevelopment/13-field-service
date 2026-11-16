@@ -34,11 +34,11 @@ echo "$page" | grep -qi 'technician' || fail "landing should describe field serv
 echo "$page" | grep -q 'Sign in' || fail "landing should offer sign in"
 pass "pages render inside the shared shell"
 
-for path in /dashboard /admin /parts; do
+for path in /dashboard /admin /parts /board /jobs /jobs/new; do
   code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE_URL$path")
   [ "$code" = "307" ] || fail "signed-out $path should redirect (307), got $code"
 done
-pass "signed-out dashboard, admin and parts redirect"
+pass "signed-out dashboard, admin, parts, board and jobs redirect"
 
 # The installable offline app (13.2): the worker is never cached, the manifest opens /tech, location is ours alone.
 sw_headers=$(curl -fsS -D - -o "$TMP/sw.js" "$BASE_URL/sw.js" | tr -d '\r') || fail "/sw.js is unreachable"
@@ -134,6 +134,23 @@ code=$(curl -s -o /dev/null -w '%{http_code}' -b "$JAR_T1" "$BASE_URL/parts")
 [ "$code" = "307" ] || fail "technician /parts should redirect (307), got $code"
 pass "dispatcher parts catalog renders; technicians are redirected"
 
+page=$(curl -fsS -b "$JAR_D" "$BASE_URL/board") || fail "dispatcher /board did not render"
+echo "$page" | grep -q 'Schedule board' || fail "dispatcher /board missing the heading"
+echo "$page" | grep -q 'Unassigned' || fail "dispatcher /board missing the unassigned tray"
+echo "$page" | grep -q 'Explore breakthruventures.ai' || fail "dispatcher /board missing the shared footer"
+if echo "$page" | grep -q 'The schedule board is being built'; then fail "dispatcher /board is still the placeholder"; fi
+page=$(curl -fsS -b "$JAR_D" "$BASE_URL/jobs") || fail "dispatcher /jobs did not render"
+echo "$page" | grep -q 'New job' || fail "dispatcher /jobs missing the new job link"
+if echo "$page" | grep -q 'This page is being built'; then fail "dispatcher /jobs is still the placeholder"; fi
+page=$(curl -fsS -b "$JAR_D" "$BASE_URL/jobs/new") || fail "dispatcher /jobs/new did not render"
+echo "$page" | grep -q 'New job' || fail "dispatcher /jobs/new missing the heading"
+echo "$page" | grep -q 'Customer' || fail "dispatcher /jobs/new missing the customer picker"
+for path in /board /jobs /jobs/new; do
+  code=$(curl -s -o /dev/null -w '%{http_code}' -b "$JAR_T1" "$BASE_URL$path")
+  [ "$code" = "307" ] || fail "technician $path should redirect (307), got $code"
+done
+pass "dispatcher board, jobs list and new job render; technicians are redirected"
+
 # --- a new sign-up has no role -----------------------------------------------------------------------------------
 
 api "" GET /api/jobs; want 401 "anonymous job list"
@@ -168,6 +185,14 @@ api "$JAR_D" POST /api/jobs "$JOB_BODY"; want 200 "replay job"
 api "$JAR_D" GET "/api/jobs?q=Smoke%20job%20$RUN_ID"; want 200 "search jobs"
 [ "$(jqr '.jobs | length')" = "1" ] || fail "replaying a client op id must leave one job, got: $BODY"
 pass "dispatcher created a job for technician 1; retrying the same client op id made one job"
+
+page=$(curl -fsS -b "$JAR_D" "$BASE_URL/jobs?q=Smoke%20job%20$RUN_ID") || fail "dispatcher /jobs search did not render"
+echo "$page" | grep -qF "Smoke job $RUN_ID" || fail "jobs list missing the smoke job"
+page=$(curl -fsS -b "$JAR_D" "$BASE_URL/board?date=$DAY") || fail "dispatcher /board for the job's day did not render"
+echo "$page" | grep -qF "Smoke job $RUN_ID" || fail "board missing the assigned smoke job"
+page=$(curl -fsS -b "$JAR_D" "$BASE_URL/jobs/new") || fail "dispatcher /jobs/new after creating a customer did not render"
+echo "$page" | grep -qF "Smoke Co $RUN_ID" || fail "new job form should list the smoke customer"
+pass "dispatcher sees the new job on /jobs and /board, and the customer on /jobs/new"
 
 api "$JAR_D" POST /api/jobs '{"customerId":"'"$CUSTOMER"'","siteId":"'"$SITE"'","title":"nul\u0000byte"}'; want 400 "NUL byte in a title"
 api "$JAR_D" POST /api/customers '{"name":"x","phone":"nul\u0000"}'; want 400 "NUL byte in a phone"
