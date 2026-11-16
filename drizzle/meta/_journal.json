@@ -64,6 +64,13 @@
       "when": 1794784409421,
       "tag": "0008_work-order-ledger",
       "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "7",
+      "when": 1794791802426,
+      "tag": "0009_sync_replay_rate_kind",
+      "breakpoints": true
     }
   ]
 }

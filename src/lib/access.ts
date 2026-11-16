@@ -13,7 +13,7 @@ import { serviceJob } from "@/lib/db/schema";
  * |             | the customer name/phone and site of those jobs come through the job; read the parts catalog.     |
  * |             | Customers, sites and the board are not readable on their own.                                    |
  * | dispatcher  | customers, sites, jobs, notes, events, parts, the board, work orders (all: draft, edit, approve,  |
- * |             | return); never `/api/sync`                                                                       |
+ * |             | return); never `/api/sync` or `/api/my/jobs` (the `sync` resource is the technician's alone)     |
  * | admin       | `stats`, `user_directory` (read) and `role` (update) and `demo` only; no job, customer or        |
  * |             | location content                                                                                 |
  *
@@ -39,6 +39,7 @@ export type Resource =
   | "part"
   | "board"
   | "work_order"
+  | "sync"
   | "stats"
   | "user_directory"
   | "role"
@@ -56,6 +57,8 @@ const RULES: Record<Actor["role"], Rule> = {
     job_event: ["read"],
     part: ["read"],
     work_order: ["read", "create", "update", "submit"],
+    // The offline channel (13.2): `read` is GET /api/my/jobs (the snapshot), `create` is POST /api/sync. Technicians only.
+    sync: ["read", "create"],
   },
   dispatcher: {
     customer: ALL,

@@ -3,7 +3,8 @@ import { createHash } from "node:crypto";
 import { and, asc, count, desc, eq, getTableColumns, gt, inArray, isNull, or, sql } from "drizzle-orm";
 import { z } from "zod";
 import { assertCan, jobScope } from "@/lib/access";
-import { type Actor, ForbiddenError, toRole } from "@/lib/auth/rbac";
+import type { Actor } from "@/lib/auth/rbac";
+import { assertActorCurrent } from "@/lib/actor-current";
 import { AI_DRAFTS_PER_HOUR, aiJobLock, capLimits } from "@/lib/caps";
 import { type Db, db, schema } from "@/lib/db";
 import { env } from "@/lib/env";
@@ -32,7 +33,7 @@ import { spendRead, writeTx } from "@/lib/write-tx";
  *   from the database and only matches SKUs it offered.
  */
 
-const { serviceJob, workOrder, workOrderLine, workOrderOp, part, jobNote, user } = schema;
+const { serviceJob, workOrder, workOrderLine, workOrderOp, part, jobNote } = schema;
 
 type Q = Db | Tx;
 type Status = (typeof schema.WORK_ORDER_STATUSES)[number];
@@ -204,15 +205,6 @@ function refuseNul(input: unknown) {
 // ---------------------------------------------------------------------------
 // Shared steps
 // ---------------------------------------------------------------------------
-
-/**
- * Re-read the acting user `for share` (the same first lock `updateJob` takes) and refuse when their role changed or they
- * were banned since the session was issued. Waits for a concurrent role change, so the check can't race it.
- */
-async function assertActorCurrent(tx: Tx, actor: Actor): Promise<void> {
-  const [row] = await tx.select({ role: user.role, banned: user.banned }).from(user).where(eq(user.id, actor.id)).for("share");
-  if (!row || row.banned || toRole(row.role) !== actor.role) throw new ForbiddenError();
-}
 
 type OpRow = typeof workOrderOp.$inferSelect & { stale: boolean };
 

@@ -413,7 +413,7 @@ export const workOrderOp = pgTable(
 // needs a migration, because the CHECK constraints below are part of the schema.
 // ---------------------------------------------------------------------------
 
-export const RATE_KINDS = ["api_write", "sync", "snapshot", "ai", "demo_load", "read"] as const;
+export const RATE_KINDS = ["api_write", "sync", "sync_replay", "snapshot", "ai", "demo_load", "read"] as const;
 export const DAILY_USAGE_KINDS = ["ai", "demo_load"] as const;
 
 /** App-wide daily counters (one row per UTC day and kind) for free-tier caps. */

@@ -2,7 +2,7 @@
 
 import { useRouter } from "next/navigation";
 import { useState } from "react";
-import { signOut } from "@/lib/auth/client";
+import { signOutAndWipe } from "@/lib/offline/browser";
 import { buttonSecondary } from "./ui/styles";
 
 export function SignOutButton() {
@@ -24,9 +24,12 @@ export function SignOutButton() {
         setPending(true);
         setFailed(false);
         try {
-          const result = await signOut();
-          if (result.error) {
-            setFailed(true);
+          // Wipes this device first (IndexedDB, caches), then signs out. Offline, the wipe still happens at once and the
+          // server sign-out finishes when the app next opens online.
+          const result = await signOutAndWipe();
+          if (result.status === "cancelled") return;
+          if (result.status === "wiped_offline" && navigator.onLine) {
+            setFailed(true); // this device is wiped, but the server didn't confirm the sign-out: try again
             return;
           }
           router.push("/sign-in");
