@@ -173,7 +173,7 @@ describe("service worker warm-up (first visit, no second online navigation)", ()
   it("saves the shell and the files the page loaded, then reports it", async () => {
     const w = worker("b1", network);
     const messages = await w.warm([`${ORIGIN}/_next/static/chunks/a.js`, `${ORIGIN}/_next/static/css/b.css`]);
-    expect(messages).toEqual([{ type: "warmed", shell: true, assets: 2 }]);
+    expect(messages).toEqual([{ type: "warmed", shell: true, assets: 2, missing: 0, ready: true }]);
     expect(allCachedPaths(w).sort()).toEqual(["/_next/static/chunks/a.js", "/_next/static/css/b.css", "/tech"]);
     // ...and now an offline navigation works.
     const offline = worker("b1", () => { throw new TypeError("offline"); });
@@ -193,15 +193,36 @@ describe("service worker warm-up (first visit, no second online navigation)", ()
 
   it("reports shell: false when it can't be saved (offline, signed out) and caches nothing from a redirect", async () => {
     const down = worker("b1", () => { throw new TypeError("offline"); });
-    expect(await down.warm([])).toEqual([{ type: "warmed", shell: false, assets: 0 }]);
+    expect(await down.warm([])).toEqual([{ type: "warmed", shell: false, assets: 0, missing: 0, ready: false }]);
     const out = worker("b1", (req) => (new URL(req.url).pathname === "/tech" ? new Response(null, { status: 307 }) : new Response("chunk")));
-    expect(await out.warm([`${ORIGIN}/_next/static/a.js`])).toEqual([{ type: "warmed", shell: false, assets: 1 }]);
+    expect(await out.warm([`${ORIGIN}/_next/static/a.js`])).toEqual([{ type: "warmed", shell: false, assets: 1, missing: 0, ready: false }]);
     expect(allCachedPaths(out).filter((p) => p === "/tech")).toEqual([]);
+  });
+
+  it("is not ready while a file is missing (the connection dropped half way), and a later warm-up completes it", async () => {
+    let up = true;
+    const w = worker("b1", (req) => {
+      const path = new URL(req.url).pathname;
+      if (path === "/tech") return html();
+      if (!up && path.endsWith("b.js")) throw new TypeError("offline");
+      if (path.endsWith("c.js")) return new Response("gone", { status: 404 });
+      return new Response("chunk");
+    });
+    const urls = [`${ORIGIN}/_next/static/a.js`, `${ORIGIN}/_next/static/b.js`];
+    up = false;
+    expect(await w.warm(urls)).toEqual([{ type: "warmed", shell: true, assets: 2, missing: 1, ready: false }]);
+    expect(allCachedPaths(w).sort()).toEqual(["/_next/static/a.js", "/tech"]);
+    up = true;
+    expect(await w.warm(urls)).toEqual([{ type: "warmed", shell: true, assets: 2, missing: 0, ready: true }]);
+    expect(w.fetched.filter((p) => p === "/tech")).toHaveLength(1); // the shell wasn't fetched again
+    expect(w.fetched.filter((p) => p.endsWith("a.js"))).toHaveLength(1);
+    // A file the server answers 404 for never becomes ready.
+    expect(await w.warm([...urls, `${ORIGIN}/_next/static/c.js`])).toEqual([{ type: "warmed", shell: true, assets: 3, missing: 1, ready: false }]);
   });
 
   it("copes with garbage input and caps the list", async () => {
     const w = worker("b1", network);
-    expect(await w.warm("nope")).toEqual([{ type: "warmed", shell: true, assets: 0 }]);
+    expect(await w.warm("nope")).toEqual([{ type: "warmed", shell: true, assets: 0, missing: 0, ready: true }]);
     const spy = vi.spyOn(globalThis, "setTimeout").mockImplementation(((fn: () => void) => {
       fn();
       return 0;

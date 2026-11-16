@@ -10,7 +10,8 @@
  * `{ type: "wipe" }` from the page (sign out) deletes every cache at once.
  * `{ type: "warm", urls }` from the page (sent once it has loaded, so a first visit works offline without a second online
  *   visit): saves the /tech shell if it isn't saved yet and the /_next/static files the page itself loaded (at most 300,
- *   one every 100 ms, so the API Gateway burst limit is never in play), then answers `{ type: "warmed", shell, assets }`.
+ *   one every 100 ms, so the API Gateway burst limit is never in play), then answers `{ type: "warmed", shell, assets, missing, ready }` (`ready` only when the shell and every file are saved; the
+ *   page asks again later when it isn't).
  * Tested in test/sw.test.ts with a fake worker scope; keep this file dependency free and ES5-friendly.
  */
 (function (scope) {
@@ -120,6 +121,7 @@
       })
       .then(function (shellSaved) {
         return scope.caches.open(STATIC).then(function (cache) {
+          var missing = 0;
           var chain = Promise.resolve();
           wanted.forEach(function (href) {
             chain = chain.then(function () {
@@ -127,16 +129,21 @@
                 if (hit) return;
                 return wait(100)
                   .then(function () { return scope.fetch(href); })
-                  .then(function (res) { if (cacheable(res)) return cache.put(href, res.clone()); })
-                  .catch(function () { /* one missing file isn't fatal */ });
+                  .then(function (res) {
+                    if (cacheable(res)) return cache.put(href, res.clone());
+                    missing++;
+                  })
+                  .catch(function () { missing++; });
               });
             });
           });
-          return chain.then(function () { return shellSaved; });
+          return chain.then(function () { return { shell: shellSaved, assets: wanted.length, missing: missing }; });
         });
       })
-      .then(function (shellSaved) {
-        if (source && source.postMessage) source.postMessage({ type: "warmed", shell: shellSaved, assets: wanted.length });
+      .then(function (summary) {
+        // Ready only when the shell AND every file the page loaded are saved: a shell without its scripts can't start offline.
+        summary.ready = summary.shell && summary.missing === 0;
+        if (source && source.postMessage) source.postMessage({ type: "warmed", shell: summary.shell, assets: summary.assets, missing: summary.missing, ready: summary.ready });
       });
   }
 
