@@ -40,6 +40,10 @@ export type EngineEnv = {
   clearTimer: (handle: unknown) => void;
   /** Run `fn` unless another tab is already flushing for this user (then resolve `undefined`). Defaults to no lock. */
   withLock?: <T>(name: string, fn: () => Promise<T>) => Promise<T | undefined>;
+  /** Run `fn` holding an exclusive cross-tab lock (it waits its turn). Defaults to running at once (one tab, or no Web Locks). */
+  exclusive?: <T>(name: string, fn: () => Promise<T>) => Promise<T>;
+  /** Tells the other tabs of this user that the shared database changed (they reload), and hears the same from them. */
+  broadcast?: { post: () => void; subscribe: (onChange: () => void) => () => void };
   /** Delete every local trace (databases, caches). Called when the session user turns out to be someone else. */
   wipe: () => Promise<void>;
   /** Called once when the engine stops (unmount, sign-out, wipe), so a registry can forget it. */
@@ -100,8 +104,9 @@ export class TechDataEngine {
   private backoffKind: "network" | "server" | null = null;
   /** Which refresh may still write: only the newest one started. */
   private refreshSeq = 0;
-  /** Bumped whenever acknowledged ops are folded into the snapshot; a GET that began before that read older state. */
-  private snapshotGen = 0;
+  /** Writers of the shared snapshot (a refresh applying, acknowledged ops folding in, a reload) take turns in this tab. */
+  private storeChain: Promise<unknown> = Promise.resolve();
+  private unsubscribe: (() => void) | null = null;
 
   constructor(
     private readonly store: OfflineStore,
@@ -149,7 +154,27 @@ export class TechDataEngine {
     this.queue = await this.store.outbox();
     const attention = await this.store.attention();
     this.rebuild({ ready: true, attention });
+    // Another tab of this user changed the database: take its state (the screen follows it, and our next intent builds on it).
+    this.unsubscribe = this.env.broadcast?.subscribe(() => void this.locked(() => this.reloadLocal()).catch(() => undefined)) ?? null;
     if (this.queue.length > 0) this.scheduleFlush(FLUSH_DEBOUNCE_MS);
+  }
+
+  private locked<T>(work: () => Promise<T>): Promise<T> {
+    const run = this.storeChain.then(work, work);
+    this.storeChain = run.catch(() => undefined);
+    return run;
+  }
+
+  /** Re-read the snapshot, outbox and attention list from IndexedDB, the one copy every tab shares. Call inside `locked`. */
+  private async reloadLocal(): Promise<void> {
+    if (this.halted) return;
+    this.snapshot = await this.store.getSnapshot();
+    this.queue = await this.store.outbox();
+    this.rebuild({ attention: await this.store.attention() });
+  }
+
+  private announce() {
+    this.env.broadcast?.post();
   }
 
   /** Stop all work and release the database. After this the engine does nothing (a wipe may be deleting the database). */
@@ -157,6 +182,8 @@ export class TechDataEngine {
     this.halted = true;
     if (this.timer !== null) this.env.clearTimer(this.timer);
     this.timer = null;
+    this.unsubscribe?.();
+    this.unsubscribe = null;
     this.store.close();
     this.set({ status: "wiped", ready: false });
     this.env.onHalt?.(this);
@@ -180,7 +207,13 @@ export class TechDataEngine {
    */
   private intents: Promise<unknown> = Promise.resolve();
   private serialize<T>(work: () => Promise<T>): Promise<T> {
-    const run = this.intents.then(work, work);
+    // In this tab one at a time; across tabs under a Web Lock, starting from what is in IndexedDB (not this tab's memory):
+    // another tab may have queued or flushed since, and the base version and dependsOn must follow it.
+    const guarded = () => {
+      const inside = () => this.locked(() => this.reloadLocal()).then(work);
+      return this.env.exclusive ? this.env.exclusive(`fsd-intent-${this.userId}`, inside) : inside();
+    };
+    const run = this.intents.then(guarded, guarded);
     this.intents = run.catch(() => undefined);
     return run;
   }
@@ -190,6 +223,7 @@ export class TechDataEngine {
     await this.store.enqueue(item);
     this.queue = await this.store.outbox();
     this.rebuild();
+    this.announce();
     this.scheduleFlush(FLUSH_DEBOUNCE_MS);
     return op.opId;
   }
@@ -235,6 +269,7 @@ export class TechDataEngine {
   async dismissAttention(opId: string): Promise<void> {
     await this.store.dismissAttention(opId);
     this.set({ attention: await this.store.attention() });
+    this.announce();
   }
 
   // -- network --------------------------------------------------------------------------------------------------------
@@ -383,14 +418,18 @@ export class TechDataEngine {
           attention.push({ opId: q.op.opId, op: q.op, label: q.label, outcome: r.outcome, code: r.code ?? "unknown", job: r.job, at: this.env.now() });
         }
       }
-      // What the answers did goes into the saved snapshot in the same commit that removes the ops from the outbox.
-      // `etag: null` forces the next refresh to be a full read: our fold is an approximation of what the server now holds.
-      const folded = this.snapshot ? { ...this.snapshot, etag: null, jobs: applyAcknowledged(this.snapshot.jobs, answered, new Date(this.env.now()).toISOString()) } : undefined;
-      await this.store.settle(done, attention, folded);
-      if (folded) {
-        this.snapshot = folded;
-        this.snapshotGen++;
-      }
+      // What the answers did goes into the saved snapshot in the same commit that removes the ops from the outbox. The
+      // snapshot is read fresh (another tab may have refreshed it) and its `rev` moves, so a GET that began earlier is dropped.
+      await this.locked(async () => {
+        const current = await this.store.getSnapshot();
+        // `etag: null` forces the next refresh to be a full read: our fold is an approximation of what the server now holds.
+        const folded = current
+          ? { ...current, etag: null, rev: (current.rev ?? 0) + 1, jobs: applyAcknowledged(current.jobs, answered, new Date(this.env.now()).toISOString()) }
+          : undefined;
+        await this.store.settle(done, attention, folded);
+        if (folded) this.snapshot = folded;
+      });
+      this.announce();
       finalAnswers += done.length;
       this.queue = await this.store.outbox();
       this.attempts = 0;
@@ -420,7 +459,7 @@ export class TechDataEngine {
   async refresh(retry = true): Promise<void> {
     if (this.halted) return;
     const seq = ++this.refreshSeq;
-    const gen = this.snapshotGen;
+    const startRev = this.snapshot?.rev ?? 0;
     const headers: Record<string, string> = { accept: "application/json" };
     if (this.snapshot?.etag) headers["if-none-match"] = this.snapshot.etag;
     let res: Response;
@@ -442,21 +481,35 @@ export class TechDataEngine {
     }
     if (this.halted) return;
     if (seq !== this.refreshSeq) return; // a newer refresh is in flight and will deliver
-    if (gen !== this.snapshotGen) return retry ? this.refresh(false) : undefined; // a sync landed meanwhile
-    if (res.status === 304 && this.snapshot) {
-      this.snapshot = { ...this.snapshot, savedAt: this.env.now() };
-      await this.store.putSnapshot(this.snapshot);
-      this.rebuild();
-      return;
-    }
-    if (!body) return;
-    if (typeof body?.userId !== "string" || !Array.isArray(body.jobs)) return;
-    if (body.userId !== this.userId) {
+    if (body && (typeof body.userId !== "string" || !Array.isArray(body.jobs))) return;
+    if (body && body.userId !== this.userId) {
       await this.ownerChanged();
       return;
     }
-    this.snapshot = { ...body, savedAt: this.env.now(), etag: res.headers.get("etag") };
-    await this.store.putSnapshot(this.snapshot);
-    this.rebuild();
+    if (!body && res.status !== 304) return;
+    const etag = res.headers.get("etag");
+    let stale = false;
+    await this.locked(async () => {
+      const current = await this.store.getSnapshot();
+      // Acknowledged ops were folded in (here or in another tab) since this request began: it read older state.
+      if ((current?.rev ?? 0) !== startRev) {
+        stale = true;
+        return;
+      }
+      if (body === null) {
+        if (!current) return;
+        this.snapshot = { ...current, savedAt: this.env.now() };
+      } else {
+        this.snapshot = { ...body, savedAt: this.env.now(), etag, rev: current?.rev ?? 0 };
+      }
+      await this.store.putSnapshot(this.snapshot);
+      this.rebuild();
+    });
+    if (stale) {
+      await this.locked(() => this.reloadLocal()); // take the folded state, then ask once more
+      if (retry) return this.refresh(false);
+      return;
+    }
+    this.announce();
   }
 }

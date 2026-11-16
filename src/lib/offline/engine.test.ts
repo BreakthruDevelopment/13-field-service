@@ -529,3 +529,35 @@ describe("the backoff deadline", () => {
     void r;
   });
 });
+
+describe("two tabs of one user", () => {
+  it("an intent in the second tab builds on what the first tab queued, read from IndexedDB", async () => {
+    const { engine: tabA, r } = await started();
+    const tabB = await r.open(USER);
+    await tabB.load(); // loaded before tab A does anything
+    const a = await tabA.setStatus(J, "en_route");
+    const b = await tabB.setStatus(J, "on_site");
+    expect(tabB.getState().pending).toBe(2);
+    await tabB.flush();
+    const [opA, opB] = sentOps(r) as Extract<WireOp, { kind: "status.set" }>[];
+    expect(opA).toMatchObject({ opId: a, baseStatusVersion: 1, dependsOn: null });
+    expect(opB).toMatchObject({ opId: b, baseStatusVersion: 2, dependsOn: a });
+  });
+
+  it("the cross-tab lock wraps each intent, and a broadcast makes the other tab reload", async () => {
+    const { engine: tabA, r } = await started();
+    const order: string[] = [];
+    r.env.exclusive = async (name, fn) => {
+      order.push(`lock:${name}`);
+      return fn();
+    };
+    const listeners: (() => void)[] = [];
+    r.env.broadcast = { post: () => listeners.forEach((l) => l()), subscribe: (cb) => (listeners.push(cb), () => undefined) };
+    const tabB = await r.open(USER);
+    await tabB.load();
+    await tabA.addNote(J, "hello"); // tab B subscribed on load, tab A did not
+    await tabB.addNote(J, "world");
+    expect(order).toEqual([`lock:fsd-intent-${USER}`, `lock:fsd-intent-${USER}`]); // one per intent
+    await vi.waitFor(() => expect(tabB.getState().pending).toBe(2));
+  });
+});

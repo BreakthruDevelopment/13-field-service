@@ -1,12 +1,12 @@
 import "server-only";
 import { createHash } from "node:crypto";
-import { and, eq, sql } from "drizzle-orm";
+import { and, eq, inArray, sql } from "drizzle-orm";
 import { z } from "zod";
 import { assertCan } from "@/lib/access";
 import { assertActorCurrent } from "@/lib/actor-current";
 import type { Actor } from "@/lib/auth/rbac";
 import { db, schema } from "@/lib/db";
-import { BadRequestError, ConflictError, HttpError, NotFoundError } from "@/lib/errors";
+import { BadRequestError, ConflictError, HttpError, NotFoundError, TooManyRequestsError } from "@/lib/errors";
 import { JOB_STATUSES, StatusRuleError } from "@/lib/job-status";
 import { locationInput } from "@/lib/location";
 import { log } from "@/lib/log";
@@ -33,7 +33,9 @@ import { consumeRate, releaseRateEvent, type Tx } from "@/lib/usage";
  * - **Lock order** is the app's: user row (share), then the job row (`lockJob`), then cap locks (`caps.ts`; this file takes
  *   none). The ledger row is per (actor, op) and is only waited on by a batch carrying the same op id.
  * - **Rate.** One `sync` unit per request (30 per technician per hour), spent after the envelope validates and refunded when
- *   nothing new was processed (a pure replay or a fully deferred request), so lost responses don't eat the allowance.
+ *   nothing new was processed (a pure replay or a fully deferred request), so lost responses don't eat the allowance. At the
+ *   limit a request that is a pure replay (every op already in the ledger with the same payload) is still answered, free,
+ *   so a batch whose response was lost can always be acknowledged; it may not process anything new (that op is deferred).
  */
 
 export const SYNC_MAX_OPS = 50;
@@ -207,7 +209,10 @@ async function applyOp(tx: Tx, actor: Actor, op: ParsedOp): Promise<Applied> {
   }
 }
 
-async function runOp(actor: Actor, op: ParsedOp, deviceId: string | null): Promise<SyncResult> {
+/** Thrown inside an op's transaction (rolling it back) when a replay-only request would have to process a new op. */
+class ReplayOnlyViolation extends Error {}
+
+async function runOp(actor: Actor, op: ParsedOp, deviceId: string | null, opts: { replayOnly?: boolean } = {}): Promise<SyncResult> {
   const hash = hashOf(op);
   return db().transaction(async (tx) => {
     await tx.execute(sql`select set_config('lock_timeout', ${String(SYNC_LOCK_TIMEOUT_MS)}, true)`);
@@ -227,6 +232,7 @@ async function runOp(actor: Actor, op: ParsedOp, deviceId: string | null): Promi
         ? { opId: op.opId, outcome: "replayed", ...stored }
         : { opId: op.opId, outcome: prev.outcome, replayed: true, ...stored };
     }
+    if (opts.replayOnly) throw new ReplayOnlyViolation(); // rolls back the claim: nothing new runs without a flush paid for
     const { outcome, ...stored } = await applyOp(tx, actor, op);
     await tx.update(syncOp).set({ outcome, result: stored }).where(and(eq(syncOp.actorId, actor.id), eq(syncOp.opId, op.opId)));
     return { opId: op.opId, outcome, ...stored };
@@ -251,7 +257,7 @@ export function parseOp(raw: unknown): ParsedOp | null {
 export async function syncBatch(
   actor: Actor,
   input: unknown,
-  opts: { budgetMs?: number; clock?: () => number } = {},
+  opts: { budgetMs?: number; clock?: () => number; /** A test seam: runs after the flush is charged (or waived) and before the first op. */ afterCharge?: () => Promise<void> } = {},
 ): Promise<SyncResponse> {
   assertCan(actor, "create", "sync");
   if (jsonHasNul(input)) throw new BadRequestError("Text can't contain null characters");
@@ -263,11 +269,19 @@ export async function syncBatch(
   const budget = opts.budgetMs ?? SYNC_BUDGET_MS;
   const started = clock();
 
-  // Spend one flush. Over the limit is a 429 and nothing is processed.
-  const rateEventId = await db().transaction(async (tx) => {
-    await assertActorCurrent(tx, actor);
-    return consumeRate(tx, actor.id, "sync", SYNC_LIMIT_PER_HOUR, "Too many syncs. Try again in a few minutes.");
-  });
+  // Spend one flush. Over the limit is a 429 and nothing is processed, unless every op is a replay of one already answered.
+  let rateEventId: string | null;
+  try {
+    rateEventId = await db().transaction(async (tx) => {
+      await assertActorCurrent(tx, actor);
+      return consumeRate(tx, actor.id, "sync", SYNC_LIMIT_PER_HOUR, "Too many syncs. Try again in a few minutes.");
+    });
+  } catch (err) {
+    if (!(err instanceof TooManyRequestsError) || !(await isPureReplay(actor, data.ops))) throw err;
+    rateEventId = null;
+  }
+  const replayOnly = rateEventId === null;
+  await opts.afterCharge?.();
 
   const results: SyncResult[] = [];
   let deferRest = false;
@@ -287,9 +301,10 @@ export async function syncBatch(
         continue;
       }
       try {
-        results.push(await runOp(actor, op, data.deviceId ?? null));
+        results.push(await runOp(actor, op, data.deviceId ?? null, { replayOnly }));
       } catch (err) {
-        if (pgCode(err) !== "55P03") throw err; // lock_not_available: the job is busy, try again later
+        // lock_not_available: the job is busy, try again later. A replay-only request that meets a new op defers it too.
+        if (pgCode(err) !== "55P03" && !(err instanceof ReplayOnlyViolation)) throw err;
         deferRest = true;
         results.push({ opId, outcome: "deferred" });
       }
@@ -301,12 +316,28 @@ export async function syncBatch(
     }
   } catch (err) {
     // Ops that committed before the failure replay for free on the retry; nothing new to charge for if none did.
-    if (results.every((r) => r.outcome === "deferred" || r.outcome === "replayed" || r.replayed)) await refund(actor, rateEventId);
+    if (rateEventId && results.every((r) => r.outcome === "deferred" || r.outcome === "replayed" || r.replayed)) await refund(actor, rateEventId);
     throw err;
   }
-  if (fresh === 0) await refund(actor, rateEventId);
+  if (fresh === 0 && rateEventId) await refund(actor, rateEventId);
   log.info("sync.batch", { ops: data.ops.length, ...counts, ms: clock() - started });
   return { results, serverTime: new Date().toISOString() };
+}
+
+/** True when every op parses and is already in the ledger with the same kind, job and payload (so answering it writes nothing). */
+async function isPureReplay(actor: Actor, raw: { opId: string }[]): Promise<boolean> {
+  const ops = raw.map(parseOp);
+  if (ops.some((o) => o === null)) return false;
+  const parsed = ops as ParsedOp[];
+  const rows = await db()
+    .select({ opId: syncOp.opId, kind: syncOp.kind, jobId: syncOp.jobId, payloadHash: syncOp.payloadHash, outcome: syncOp.outcome })
+    .from(syncOp)
+    .where(and(eq(syncOp.actorId, actor.id), inArray(syncOp.opId, parsed.map((o) => o.opId))));
+  const byId = new Map(rows.map((r) => [r.opId, r]));
+  return parsed.every((o) => {
+    const row = byId.get(o.opId);
+    return row !== undefined && row.outcome !== null && row.kind === o.kind && row.jobId === o.jobId && row.payloadHash === hashOf(o);
+  });
 }
 
 async function refund(actor: Actor, eventId: string): Promise<void> {

@@ -45,6 +45,26 @@ export async function createBrowserEngine(userId: string): Promise<TechDataEngin
           return out.ran ? out.value : undefined;
         }
       : undefined,
+    exclusive: locks
+      ? async <T,>(name: string, fn: () => Promise<T>) => (await locks.request(name, async () => ({ value: await fn() }))).value
+      : undefined,
+    broadcast:
+      typeof BroadcastChannel === "undefined"
+        ? undefined
+        : (() => {
+            const channel = new BroadcastChannel(`fsd-${userId}`);
+            const listeners = new Set<() => void>();
+            channel.onmessage = () => listeners.forEach((l) => l());
+            return {
+              post: () => channel.postMessage("changed"),
+              subscribe: (cb: () => void) => {
+                listeners.add(cb);
+                return () => {
+                  listeners.delete(cb);
+                };
+              },
+            };
+          })(),
     wipe: () => wipeLocalData(wipeEnv()),
     onHalt: (e) => void engines.delete(e),
   };

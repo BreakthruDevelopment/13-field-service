@@ -417,6 +417,45 @@ describe.skipIf(!testDatabaseUrl)("offline sync (Postgres)", () => {
     }, 60_000);
   });
 
+  describe("replays at the limit", () => {
+    it("a batch whose response was lost is still answered at the limit (free); anything new is a 429 or deferred", async () => {
+      const job = await newJob(t2);
+      await sql`delete from rate_event where user_id = ${t2.id}`;
+      const lost = [note(job.id, "response lost"), status(job.id, "en_route", job.statusVersion)];
+      await run(t2, lost); // the 1st flush; its answer never reaches the phone
+      await sql`insert into rate_event (user_id, kind) select ${t2.id}, 'sync' from generate_series(1, 29)`; // now at 30
+      const replay = await run(t2, lost);
+      expect(replay.results.map((r) => r.outcome)).toEqual(["replayed", "replayed"]);
+      expect((await rows(sql`select count(*)::int as n from rate_event where user_id = ${t2.id} and kind = 'sync'`))[0].n).toBe(30); // no charge
+      // New work at the limit is still a 429, alone or mixed with replays, and so is a reused op id.
+      await expect(run(t2, [note(job.id, "new")])).rejects.toMatchObject({ status: 429 });
+      await expect(run(t2, [...lost, note(job.id, "new")])).rejects.toMatchObject({ status: 429 });
+      await expect(run(t2, [{ ...lost[0], body: "changed" }])).rejects.toMatchObject({ status: 429 });
+      await expect(run(t2, [{ kind: "photo.add", opId: uuid(), jobId: job.id }])).rejects.toMatchObject({ status: 429 });
+      expect(await count("job_note", job.id)).toBe(1);
+    });
+
+    it("a replay-only request never processes a new op, even if the ledger row it relied on goes away before the op runs", async () => {
+      const job = await newJob(t2);
+      await sql`delete from rate_event where user_id = ${t2.id}`;
+      const n = note(job.id, "will be pruned");
+      await run(t2, [n]);
+      await sql`insert into rate_event (user_id, kind) select ${t2.id}, 'sync' from generate_series(1, 29)`;
+      const res = await run(t2, [n], {
+        afterCharge: async () => {
+          await sql`delete from job_note where op_id = ${n.opId}`;
+          await sql`delete from sync_op where actor_id = ${t2.id} and op_id = ${n.opId}`; // pruned between the check and the op
+        },
+      });
+      expect(res.results.map((r) => r.outcome)).toEqual(["deferred"]);
+      expect(await count("job_note", job.id)).toBe(0);
+      expect((await rows(sql`select count(*)::int as n from sync_op where actor_id = ${t2.id} and op_id = ${n.opId}`))[0].n).toBe(0);
+      expect((await rows(sql`select count(*)::int as n from rate_event where user_id = ${t2.id} and kind = 'sync'`))[0].n).toBe(30); // still no charge
+      // Now that it is a new op, it needs a flush: refused at the limit.
+      await expect(run(t2, [n])).rejects.toMatchObject({ status: 429 });
+    });
+  });
+
   describe("races", () => {
     it("the same batch sent six times at once applies each op exactly once", async () => {
       const job = await newJob();

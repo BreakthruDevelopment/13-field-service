@@ -29,7 +29,11 @@ export type TechJob = {
 
 export type Snapshot = { userId: string; serverTime: string; jobs: TechJob[]; truncated: boolean };
 
-export type StoredSnapshot = Snapshot & { savedAt: number; etag: string | null };
+/**
+ * `rev` counts the times acknowledged ops were folded into this snapshot (see `applyAcknowledged`). A refresh that began
+ * before a fold read older state, so it is applied only if the saved `rev` is still the one it started with, in any tab.
+ */
+export type StoredSnapshot = Snapshot & { savedAt: number; etag: string | null; rev?: number };
 
 export type CheckInLocation = { lat: number; lng: number; accuracyM: number; capturedAt: string };
 
