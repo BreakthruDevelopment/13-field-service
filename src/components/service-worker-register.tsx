@@ -18,13 +18,34 @@ export function ServiceWorkerRegister() {
     let attempts = 0;
     let ready = false;
     let timer: number | undefined;
+    // After a deploy `container.ready` can still be the OLD worker while the new one installs; the new one deletes the old
+    // build's caches when it activates. So warm the newest worker, once it is active.
+    const settled = async (registration: ServiceWorkerRegistration): Promise<ServiceWorker | null> => {
+      const worker = registration.installing ?? registration.waiting ?? registration.active;
+      if (!worker) return null;
+      if (worker.state !== "activated") {
+        await new Promise<void>((resolve) => {
+          const check = () => {
+            if (worker.state === "activated" || worker.state === "redundant") {
+              worker.removeEventListener("statechange", check);
+              resolve();
+            }
+          };
+          worker.addEventListener("statechange", check);
+          check();
+        });
+      }
+      return worker.state === "activated" ? worker : (registration.active ?? null);
+    };
     const warm = async () => {
       try {
         const registration = await container.ready;
+        const worker = await settled(registration);
+        if (!worker) return;
         // On a first visit this page isn't controlled by the worker, so it never saw our requests: hand it the list of
         // files this page loaded (they come from the browser's own cache) and have it save the shell.
         const urls = performance.getEntriesByType("resource").map((e) => e.name).filter((n) => n.includes("/_next/static/"));
-        registration.active?.postMessage({ type: "warm", urls });
+        worker.postMessage({ type: "warm", urls });
       } catch {
         // no worker: the app still works online
       }
@@ -43,6 +64,14 @@ export function ServiceWorkerRegister() {
     const onOnline = () => {
       if (!ready) void warm();
     };
+    // A new worker took control (a deploy): what was saved by the old one is gone, so readiness starts over.
+    const onControllerChange = () => {
+      ready = false;
+      attempts = 0;
+      document.documentElement.dataset.offlineReady = "0";
+      void warm();
+    };
+    container.addEventListener("controllerchange", onControllerChange);
     container.addEventListener("message", onMessage);
     window.addEventListener("online", onOnline);
     let cancelled = false;
@@ -59,6 +88,7 @@ export function ServiceWorkerRegister() {
       cancelled = true;
       window.clearTimeout(timer);
       container.removeEventListener("message", onMessage);
+      container.removeEventListener("controllerchange", onControllerChange);
       window.removeEventListener("online", onOnline);
     };
   }, []);
