@@ -80,6 +80,11 @@ describe("queueing", () => {
     expect(opB.location).toMatchObject({ lat: 30.2672 });
   });
 
+  it("a job whose notes were cut from the snapshot (notesTruncated) is not refused for having no note", async () => {
+    const { engine } = await started(happy(), [job({ status: "on_site", statusVersion: 2, notes: [], notesTruncated: true })]);
+    await expect(engine.setStatus(J, "completed")).resolves.toBeTruthy();
+  });
+
   it("checks the status rules locally: no illegal move, no completing without a note, location only on_site", async () => {
     const { engine } = await started();
     await expect(engine.setStatus(J, "completed")).rejects.toMatchObject({ code: "transition_not_allowed" });

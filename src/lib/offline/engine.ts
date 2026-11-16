@@ -248,7 +248,8 @@ export class TechDataEngine {
       const job = this.job(jobId);
       if (opts.location && to !== "on_site") throw new LocalRuleError("location_only_on_site", "A location can only be sent when checking in on site.");
       if (!isWorkTransition(job.status, to)) throw new LocalRuleError("transition_not_allowed", `A ${job.status.replace("_", " ")} job can't move to ${to.replace("_", " ")}.`);
-      if (transitionNeedsNote(to) && job.notes.length === 0) throw new LocalRuleError("note_required", "Add a note about the work before you do that.");
+      // `notesTruncated` means older notes exist that did not fit the snapshot: the server has them, so do not refuse here.
+      if (transitionNeedsNote(to) && job.notes.length === 0 && !job.notesTruncated) throw new LocalRuleError("note_required", "Add a note about the work before you do that.");
       const previous = [...this.queue].reverse().find((q) => q.op.kind === "status.set" && q.op.jobId === jobId);
       return this.enqueue(
         {
