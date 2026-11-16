@@ -502,6 +502,53 @@ describe("stale refreshes", () => {
   });
 });
 
+describe("two tabs refreshing out of order", () => {
+  const snap = (title: string, serverTime: string) => ({ userId: USER, serverTime, jobs: [job({ title })], truncated: false });
+
+  it("a delayed older answer in one tab doesn't overwrite the newer snapshot the other tab saved", async () => {
+    const release: (() => void)[] = [];
+    let calls = 0;
+    const { engine: tabA, r } = await started((url) => {
+      if (url !== "/api/my/jobs") return reply(200, {});
+      calls++;
+      if (calls === 1) {
+        // tab A's request: read the OLD state, answered late
+        return new Promise<Response>((resolve) => release.push(() => resolve(reply(200, snap("old", "2026-11-15T10:00:00.000Z"), { etag: 'W/"old"' }))));
+      }
+      return reply(200, snap("new", "2026-11-15T10:00:05.000Z"), { etag: 'W/"new"' });
+    });
+    const tabB = await r.open(USER);
+    await tabB.load();
+    const delayed = tabA.refresh(false); // no automatic retry: only the write guard is under test
+    await tabB.refresh(); // tab B asks later, is answered first, saves the newer snapshot
+    release[0]();
+    await delayed;
+    const reopened = await r.open(USER);
+    await reopened.load();
+    expect(reopened.getState().jobs[0].title).toBe("new");
+    expect(tabA.getState().jobs[0].title).toBe("new"); // and tab A shows what is saved, not what it was just sent
+  });
+
+  it("an older answer is dropped by its server time even when the revision hasn't moved", async () => {
+    let release: () => void = () => undefined;
+    const { engine, r } = await started(
+      () =>
+        new Promise<Response>((resolve) => {
+          release = () => resolve(reply(200, snap("old", "2026-11-15T10:00:00.000Z"), { etag: 'W/"old"' }));
+        }),
+    );
+    const pending = engine.refresh(false);
+    // Another tab saved a newer snapshot without a revision change (an older client's write).
+    const other = await r.open(USER);
+    await (other as unknown as { store: { putSnapshot: (s: unknown) => Promise<void> } }).store.putSnapshot({ ...snapshotFor(USER, [job({ title: "newer" })], r.clock.t), serverTime: "2026-11-15T10:00:09.000Z" });
+    release();
+    await pending;
+    const reopened = await r.open(USER);
+    await reopened.load();
+    expect(reopened.getState().jobs[0].title).toBe("newer");
+  });
+});
+
 describe("overlapping taps", () => {
   it("two status actions that start before the first is stored chain: the second sees the first's version and depends on it", async () => {
     const { engine, r } = await started();

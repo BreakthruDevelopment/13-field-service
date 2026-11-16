@@ -28,13 +28,19 @@ function worker(build = "b1", network: (req: Request) => Promise<Response> | Res
     location: new URL(`${ORIGIN}/sw.js?v=${build}`),
     caches: {
       open: async (n: string) => stores.get(n) ?? stores.set(n, new FakeCache()).get(n)!,
+      match: async (r: Request | string, opts?: { cacheName?: string }) => {
+        for (const [name, cache] of stores) if (!opts?.cacheName || opts.cacheName === name) { const hit = await cache.match(r); if (hit) return hit; }
+        return undefined;
+      },
       keys: async () => [...stores.keys()],
       delete: async (n: string) => stores.delete(n),
     },
-    fetch: async (input: Request | string) => {
+    fetch: async (input: Request | string, init?: { signal?: AbortSignal }) => {
       const req = typeof input === "string" ? new Request(input) : input;
       fetched.push(new URL(req.url).pathname);
-      const res = await network(req);
+      const signal = init?.signal ?? (typeof input === "string" ? undefined : input.signal);
+      const aborted = new Promise<never>((_, reject) => signal?.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError"))));
+      const res = await Promise.race([Promise.resolve(network(req)), aborted]);
       // A real same-origin network response has type "basic"; a hand-made Response has "default".
       if (res.type === "default") Object.defineProperty(res, "type", { value: "basic" });
       return res;
@@ -231,5 +237,76 @@ describe("service worker warm-up (first visit, no second online navigation)", ()
     const [msg] = (await w.warm(many)) as { assets: number }[];
     spy.mockRestore();
     expect(msg.assets).toBe(300);
+  });
+});
+
+describe("a wipe during in-flight work", () => {
+  const gate = () => {
+    let open!: () => void;
+    const promise = new Promise<void>((resolve) => (open = resolve));
+    return { promise, open };
+  };
+  const settle = () => new Promise((r) => setTimeout(r, 300));
+
+  it("a warm-up whose /tech fetch is still pending when the device is wiped writes nothing and creates no cache", async () => {
+    const g = gate();
+    const w = worker("b1", async (req) => {
+      if (new URL(req.url).pathname === "/tech") await g.promise;
+      return new URL(req.url).pathname === "/tech" ? html() : new Response("chunk");
+    });
+    const warming = w.warm([`${ORIGIN}/_next/static/chunks/a.js`]);
+    await new Promise((r) => setTimeout(r, 20));
+    await w.lifecycle("message", { type: "wipe" });
+    g.open(); // the response arrives after the wipe (a real fetch would have been aborted; a late one must still write nothing)
+    const messages = (await warming) as unknown[];
+    await settle();
+    expect([...w.stores.keys()]).toEqual([]);
+    expect(messages).toEqual([{ type: "warmed", shell: false, assets: 1, missing: 1, ready: false }]);
+  });
+
+  it("a wipe aborts the fetches of a warm-up in flight and the later files are never requested", async () => {
+    const g = gate();
+    const w = worker("b1", async (req) => {
+      if (new URL(req.url).pathname === "/_next/static/chunks/a.js") await g.promise;
+      return new URL(req.url).pathname === "/tech" ? html() : new Response("chunk");
+    });
+    const warming = w.warm([`${ORIGIN}/_next/static/chunks/a.js`, `${ORIGIN}/_next/static/chunks/b.js`]);
+    await new Promise((r) => setTimeout(r, 400)); // the shell is saved, a.js is pending
+    expect(allCachedPaths(w)).toEqual(["/tech"]);
+    await w.lifecycle("message", { type: "wipe" });
+    await warming; // settles because the pending fetch was aborted, without g.open()
+    await settle();
+    expect([...w.stores.keys()]).toEqual([]);
+    expect(w.fetched).not.toContain("/_next/static/chunks/b.js");
+  });
+
+  it("a page's own /_next/static fetch that finishes after a wipe is answered but not cached", async () => {
+    const g = gate();
+    const w = worker("b1", async () => {
+      await g.promise;
+      return new Response("chunk");
+    });
+    const answer = w.ask(new Request(`${ORIGIN}/_next/static/a.js`));
+    await new Promise((r) => setTimeout(r, 20));
+    await w.lifecycle("message", { type: "wipe" });
+    g.open();
+    expect(await (await answer)!.text()).toBe("chunk");
+    await settle();
+    expect([...w.stores.keys()]).toEqual([]);
+  });
+
+  it("a shell navigation that finishes after a wipe is answered but not cached", async () => {
+    const g = gate();
+    const w = worker("b1", async () => {
+      await g.promise;
+      return html();
+    });
+    const answer = w.ask(w.nav("/tech"));
+    await new Promise((r) => setTimeout(r, 20));
+    await w.lifecycle("message", { type: "wipe" });
+    g.open();
+    expect(await (await answer)!.text()).toBe("<html>shell</html>");
+    await settle();
+    expect([...w.stores.keys()]).toEqual([]);
   });
 });

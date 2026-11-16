@@ -22,6 +22,30 @@
   var SHELL = "fsd-shell-" + BUILD;
   var SHELL_URL = "/tech";
 
+  // Wipe generation: every cache writer captures it when it starts and writes nothing once it has changed. A wipe bumps it,
+  // aborts the warm-ups in flight and deletes every cache, so a fetch that was pending during the wipe can't put its
+  // response (or re-create a cache) afterwards.
+  var generation = 0;
+  var inflight = [];
+
+  function wipeAll() {
+    generation++;
+    inflight.splice(0).forEach(function (c) { try { c.abort(); } catch (e) { /* ignore */ } });
+    return deleteAllCaches();
+  }
+
+  // Open `name` and run `work(cache)` only if no wipe happened since `gen`; a wipe in between removes what was made.
+  function writeCache(gen, name, work) {
+    if (gen !== generation) return Promise.resolve();
+    return scope.caches.open(name).then(function (cache) {
+      if (gen !== generation) return scope.caches.delete(name);
+      return Promise.resolve(work(cache)).then(function (value) {
+        if (gen !== generation) return scope.caches.delete(name).then(function () { return value; });
+        return value;
+      });
+    });
+  }
+
   function deleteAllCaches() {
     return scope.caches.keys().then(function (keys) {
       return Promise.all(keys.map(function (k) { return scope.caches.delete(k); }));
@@ -47,7 +71,7 @@
   scope.addEventListener("message", function (event) {
     var data = event.data;
     if (!data) return;
-    if (data.type === "wipe") event.waitUntil(deleteAllCaches());
+    if (data.type === "wipe") event.waitUntil(wipeAll());
     else if (data.type === "warm") event.waitUntil(warm(data.urls, event.source));
   });
 
@@ -60,19 +84,22 @@
   }
 
   function staticFirst(request) {
-    return scope.caches.open(STATIC).then(function (cache) {
-      return cache.match(request).then(function (hit) {
-        if (hit) return hit;
-        return scope.fetch(request).then(function (res) {
-          if (cacheable(res)) cache.put(request, res.clone());
-          return res;
-        });
+    var gen = generation;
+    return scope.caches.match(request, { cacheName: STATIC }).then(function (hit) {
+      if (hit) return hit;
+      return scope.fetch(request).then(function (res) {
+        if (cacheable(res)) {
+          var copy = res.clone();
+          writeCache(gen, STATIC, function (cache) { return cache.put(request, copy); }).catch(function () { /* best effort */ });
+        }
+        return res;
       });
     });
   }
 
   // Decide what to do with a /tech response. Returns true when it was saved as the shell.
-  function keepShell(res) {
+  function keepShell(res, gen) {
+    if (gen === undefined) gen = generation;
     // A redirect (to /sign-in, or /waiting for a role that lost access) is never cached, and it means this device
     // can't be showing a technician's shell any more: drop everything.
     if (res.redirected || res.type === "opaqueredirect" || res.status === 0 || (res.status >= 300 && res.status < 400) || res.status === 401 || res.status === 403) {
@@ -80,15 +107,16 @@
     }
     if (cacheable(res) && /text\/html/.test(res.headers.get("content-type") || "")) {
       var copy = res.clone();
-      return scope.caches.open(SHELL).then(function (cache) { return cache.put(SHELL_URL, copy); }).then(function () { return true; });
+      return writeCache(gen, SHELL, function (cache) { return cache.put(SHELL_URL, copy); }).then(function () { return gen === generation; });
     }
     return Promise.resolve(false);
   }
 
   function shell(request) {
+    var gen = generation;
     return scope.fetch(request).then(
       function (res) {
-        return keepShell(res).then(function () { return res; });
+        return keepShell(res, gen).then(function () { return res; });
       },
       function () {
         // Offline: the saved shell, if there is one.
@@ -111,38 +139,43 @@
         if (url.origin === scope.location.origin && url.pathname.indexOf("/_next/static/") === 0 && wanted.indexOf(url.href) < 0) wanted.push(url.href);
       } catch (e) { /* not a URL */ }
     });
-    return scope.caches.open(SHELL)
-      .then(function (cache) { return cache.match(SHELL_URL); })
+    var gen = generation;
+    var abort = typeof AbortController === "function" ? new AbortController() : null;
+    if (abort) inflight.push(abort);
+    var signal = abort ? abort.signal : undefined;
+    return scope.caches.match(SHELL_URL, { cacheName: SHELL })
       .then(function (hit) {
         if (hit) return true;
-        return scope.fetch(new Request(scope.location.origin + SHELL_URL, { credentials: "same-origin", headers: { accept: "text/html" } }))
-          .then(keepShell)
+        return scope.fetch(new Request(scope.location.origin + SHELL_URL, { credentials: "same-origin", headers: { accept: "text/html" }, signal: signal }))
+          .then(function (res) { return keepShell(res, gen); })
           .catch(function () { return false; });
       })
       .then(function (shellSaved) {
-        return scope.caches.open(STATIC).then(function (cache) {
-          var missing = 0;
-          var chain = Promise.resolve();
-          wanted.forEach(function (href) {
-            chain = chain.then(function () {
-              return cache.match(href).then(function (hit) {
-                if (hit) return;
-                return wait(100)
-                  .then(function () { return scope.fetch(href); })
-                  .then(function (res) {
-                    if (cacheable(res)) return cache.put(href, res.clone());
-                    missing++;
-                  })
-                  .catch(function () { missing++; });
-              });
+        var missing = 0;
+        var chain = Promise.resolve();
+        wanted.forEach(function (href) {
+          chain = chain.then(function () {
+            if (gen !== generation) { missing++; return; }
+            return scope.caches.match(href, { cacheName: STATIC }).then(function (hit) {
+              if (hit) return;
+              return wait(100)
+                .then(function () { return gen === generation ? scope.fetch(href, { signal: signal }) : Promise.reject(new Error("wiped")); })
+                .then(function (res) {
+                  if (!cacheable(res)) { missing++; return; }
+                  var copy = res.clone();
+                  return writeCache(gen, STATIC, function (cache) { return cache.put(href, copy); });
+                })
+                .catch(function () { missing++; });
             });
           });
-          return chain.then(function () { return { shell: shellSaved, assets: wanted.length, missing: missing }; });
         });
+        return chain.then(function () { return { shell: shellSaved && gen === generation, assets: wanted.length, missing: missing }; });
       })
       .then(function (summary) {
         // Ready only when the shell AND every file the page loaded are saved: a shell without its scripts can't start offline.
-        summary.ready = summary.shell && summary.missing === 0;
+        summary.ready = summary.shell && summary.missing === 0 && gen === generation;
+        var idx = inflight.indexOf(abort);
+        if (idx >= 0) inflight.splice(idx, 1);
         if (source && source.postMessage) source.postMessage({ type: "warmed", shell: summary.shell, assets: summary.assets, missing: summary.missing, ready: summary.ready });
       });
   }

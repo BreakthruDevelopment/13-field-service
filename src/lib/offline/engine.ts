@@ -500,11 +500,19 @@ export class TechDataEngine {
         stale = true;
         return;
       }
+      // The saved snapshot is shared by every tab. A response that is older than what is saved (another tab's refresh
+      // was answered after this request began, but this one's answer came back later) must not overwrite it.
+      if (body !== null && current && Date.parse(body.serverTime) < Date.parse(current.serverTime)) {
+        this.snapshot = current;
+        this.rebuild();
+        return;
+      }
       if (body === null) {
         if (!current) return;
         this.snapshot = { ...current, savedAt: this.env.now() };
       } else {
-        this.snapshot = { ...body, savedAt: this.env.now(), etag, rev: current?.rev ?? 0 };
+        // Saving advances the shared revision, so every other tab's request still in flight is recognised as older.
+        this.snapshot = { ...body, savedAt: this.env.now(), etag, rev: (current?.rev ?? 0) + 1 };
       }
       await this.store.putSnapshot(this.snapshot);
       this.rebuild();
