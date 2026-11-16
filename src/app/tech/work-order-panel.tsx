@@ -8,7 +8,6 @@ import {
   type PartPick,
   type WorkOrderActionResult,
   type WorkOrderDto,
-  type WorkOrderEdit,
   draftWorkOrderAction,
   loadWorkOrderAction,
   saveWorkOrderAction,
@@ -16,6 +15,16 @@ import {
   submitWorkOrderAction,
 } from "./actions";
 import { FLAG_LABEL, userTextClass } from "./present";
+import {
+  EMPTY_FORM,
+  type FormState,
+  type LineForm,
+  canonical,
+  describeForm,
+  fromDto,
+  parseForm,
+  unsavedBeforeReplace,
+} from "./work-order-form";
 
 const UNIT_LABEL: Record<string, string> = {
   each: "Each",
@@ -28,75 +37,10 @@ const UNIT_LABEL: Record<string, string> = {
   set: "Set",
 };
 
-type TaskForm = { key: string; description: string; state: "done" | "to_do" };
-type LineForm = { key: string; sku: string; mentioned: string; qty: string; unit: string; used: "used" | "needed"; flags: string[] };
-type FormState = { summary: string; followUp: string; tasks: TaskForm[]; lines: LineForm[] };
 type Pending = "draft" | "save" | "submit" | null;
 
-const EMPTY_FORM: FormState = { summary: "", followUp: "", tasks: [], lines: [] };
-
-function fromDto(order: WorkOrderDto): FormState {
-  return {
-    summary: order.summary,
-    followUp: order.followUp ?? "",
-    tasks: order.tasks.map((task) => ({ key: crypto.randomUUID(), description: task.description, state: task.state })),
-    lines: order.lines.map((line) => ({
-      key: crypto.randomUUID(),
-      sku: line.sku ?? "",
-      mentioned: line.mentioned,
-      qty: String(line.qty),
-      unit: line.unit,
-      used: line.used,
-      flags: [...line.flags],
-    })),
-  };
-}
-
-function canonical(form: FormState): string {
-  return JSON.stringify({
-    summary: form.summary.trim(),
-    followUp: form.followUp.trim(),
-    tasks: form.tasks.map((task) => ({ description: task.description.trim(), state: task.state })),
-    lines: form.lines.map((line) => ({
-      sku: line.sku.trim().toUpperCase(),
-      mentioned: line.mentioned.trim(),
-      qty: line.qty.trim(),
-      unit: line.unit,
-      used: line.used,
-    })),
-  });
-}
-
-function parseForm(form: FormState, units: readonly string[]): { ok: true; value: Omit<WorkOrderEdit, "clientOpId" | "version"> } | { ok: false; error: string } {
-  const texts = [form.summary, form.followUp, ...form.tasks.map((task) => task.description), ...form.lines.flatMap((line) => [line.mentioned, line.sku])];
-  if (texts.some((value) => value.includes("\0"))) return { ok: false, error: "Text can't contain null characters" };
-  const summary = form.summary.trim();
-  if (summary.length > 400) return { ok: false, error: "Summary is at most 400 characters." };
-  const follow = form.followUp.trim();
-  if (follow.length > 300) return { ok: false, error: "Follow-up is at most 300 characters." };
-  if (form.tasks.length > 12) return { ok: false, error: "A work order has at most 12 tasks." };
-  if (form.lines.length > 30) return { ok: false, error: "A work order has at most 30 parts." };
-  const tasks: WorkOrderEdit["tasks"] = [];
-  for (const task of form.tasks) {
-    const description = task.description.trim();
-    if (!description) return { ok: false, error: "Each task needs a description." };
-    if (description.length > 200) return { ok: false, error: "A task is at most 200 characters." };
-    tasks.push({ description, state: task.state });
-  }
-  const lines: WorkOrderEdit["lines"] = [];
-  for (const line of form.lines) {
-    const mentioned = line.mentioned.trim();
-    if (!mentioned) return { ok: false, error: "Say what the part is." };
-    if (mentioned.length > 120) return { ok: false, error: "A part name is at most 120 characters." };
-    const qty = Number(line.qty);
-    if (!Number.isFinite(qty) || qty <= 0 || qty > 9999) return { ok: false, error: "Enter a quantity greater than 0." };
-    if (!units.includes(line.unit)) return { ok: false, error: "Choose a unit." };
-    const sku = line.sku.trim();
-    if (sku && !/^[A-Za-z0-9-]{2,40}$/.test(sku)) return { ok: false, error: "SKU is 2 to 40 letters, digits or dashes." };
-    lines.push({ sku: sku ? sku.toUpperCase() : null, mentioned, qty, unit: line.unit, used: line.used });
-  }
-  return { ok: true, value: { summary, tasks, followUp: follow ? follow : null, lines } };
-}
+/** Unsaved text a newer server version would have replaced. It stays on screen until the technician deals with it. */
+type KeptText = { id: string; form: FormState; text: string };
 
 function FlagList({ flags }: { flags: readonly string[] }) {
   if (flags.length === 0) return null;
@@ -307,7 +251,11 @@ export function WorkOrderPanel({
   const [error, setError] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
   const [pending, setPending] = useState<Pending>(null);
+  const [kept, setKept] = useState<KeptText[]>([]);
+  const [copiedId, setCopiedId] = useState<string | null>(null);
+  const [copyError, setCopyError] = useState<string | null>(null);
   const orderRef = useRef<WorkOrderDto | null>(null);
+  const formRef = useRef<FormState>(EMPTY_FORM);
   const attempt = useRef(0);
   const busy = useRef(false);
   const draftOp = useRef<KeyedOp | null>(null);
@@ -318,13 +266,47 @@ export function WorkOrderPanel({
   const editable = !!order && !cancelled && (order.status === "draft" || order.status === "returned");
   const dirty = order ? canonical(form) !== canonical(fromDto(order)) : false;
 
+  // The form the technician can see right now, for the moment a new server version arrives.
+  useEffect(() => {
+    formRef.current = form;
+  }, [form]);
+
+  /**
+   * Show the server's version — but never throw away what the technician typed. When a different version replaces the
+   * form (a stale-version conflict, a reload after reconnecting, "Draft again"), their unsaved words are kept on screen
+   * to copy or put back, the same way a refused note keeps its words (decision D5).
+   */
   const takeOrder = useCallback((next: WorkOrderDto | null) => {
     const prev = orderRef.current;
     const same = !!(next && prev && prev.id === next.id && prev.version === next.version);
     orderRef.current = next;
     setOrder(next);
-    if (next && !same) setForm(fromDto(next));
+    if (!next || same) return;
+    const unsaved = unsavedBeforeReplace(prev, formRef.current, next);
+    if (unsaved) {
+      setKept((current) => [{ id: crypto.randomUUID(), form: unsaved, text: describeForm(unsaved) }, ...current]);
+    }
+    setForm(fromDto(next));
   }, []);
+
+  function restoreKept(entry: KeptText) {
+    formRef.current = entry.form;
+    setForm(entry.form);
+    setKept((current) => current.filter((item) => item.id !== entry.id));
+    setError(null);
+    setMessage("Your text is back in the form. Save changes to send it with the version now on the server.");
+  }
+
+  async function copyKept(entry: KeptText) {
+    setCopyError(null);
+    try {
+      await navigator.clipboard.writeText(entry.text);
+      setCopiedId(entry.id);
+    } catch {
+      setCopiedId(null);
+      setCopyError("Couldn't copy automatically. Select the text and copy it.");
+    }
+  }
 
   const load = useCallback(() => {
     const token = ++attempt.current;
@@ -460,6 +442,34 @@ export function WorkOrderPanel({
         {message && (
           <p role="status" className="text-sm font-medium text-success">
             {message}
+          </p>
+        )}
+        {kept.map((entry) => (
+          <div key={entry.id} role="status" className="min-w-0 rounded-card border border-border p-3">
+            <p className="font-medium">Your unsaved changes were not saved</p>
+            <p className="mt-1 text-sm text-muted">
+              This work order changed somewhere else, so the version now shown is the one on the server. Your words are
+              kept here until you dismiss them.
+            </p>
+            <p className={`mt-2 whitespace-pre-wrap rounded-card bg-background px-3 py-2 text-sm ${userTextClass}`}>{entry.text}</p>
+            <div className="mt-3 flex flex-wrap gap-2">
+              <button type="button" className={buttonSecondary} onClick={() => void copyKept(entry)}>
+                {copiedId === entry.id ? "Copied" : "Copy my text"}
+              </button>
+              {editable && (
+                <button type="button" className={buttonSecondary} disabled={!online || pending !== null} onClick={() => restoreKept(entry)}>
+                  Put my text back
+                </button>
+              )}
+              <button type="button" className={buttonSecondary} onClick={() => setKept((current) => current.filter((item) => item.id !== entry.id))}>
+                Dismiss
+              </button>
+            </div>
+          </div>
+        ))}
+        {copyError && (
+          <p role="alert" className="text-sm font-medium text-danger">
+            {copyError}
           </p>
         )}
         {phase === "loading" && !order && <p className="text-sm text-muted">Loading the work order…</p>}

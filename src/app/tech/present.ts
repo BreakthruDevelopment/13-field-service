@@ -11,6 +11,8 @@ export type JobBucket = "today" | "upcoming" | "recent";
 const CLOSED: readonly JobStatus[] = ["completed", "cancelled"];
 const ACTIVE: readonly JobStatus[] = ["en_route", "on_site", "on_hold"];
 
+// Word for word the same map as JOB_STATUS_LABELS in #18 (src/lib/job-display.ts) and #19 (src/lib/field-format.ts):
+// duplication, not technician-specific wording. The three become one shared map in the rebase planned for these PRs.
 export const STATUS_LABEL: Record<JobStatus, string> = {
   unassigned: "Unassigned",
   scheduled: "Scheduled",
