@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Scripted browser run of the offline technician flow (13.2), in real Chrome through playwright-core:
-//   sign in -> load /tech (service worker installs, shell + chunks cached) -> go offline -> reload (served from the cache)
+//   sign in -> load /tech once (the service worker saves the shell and the page's files) -> go offline -> reload (served from the cache)
 //   -> add a note, "En route", "Check in at site" (geolocation) offline -> reload (outbox survives) -> go online
 //   -> exactly one successful /api/sync with the three ops -> sign out leaves no fsd-* database, no cache, no registry.
 //   Then: a different user signing in on the same device deletes the previous user's database.
@@ -91,9 +91,8 @@ try {
   await waitText("ready", "ready");
   await page.getByTestId("job-title").waitFor();
   ok("online: the harness shows the technician's job from the snapshot");
-  await page.evaluate(() => navigator.serviceWorker.ready);
-  await page.reload(); // now controlled by the worker: static chunks and the shell are cached as they load
-  await waitText("ready", "ready");
+  // First visit, no second online navigation: the page hands the worker its file list and the worker saves the shell.
+  await page.waitForFunction(() => document.documentElement.dataset.offlineReady === "1", null, { timeout: 30_000 });
   const cached = await page.evaluate(async () => {
     const out = {};
     for (const k of await caches.keys()) out[k] = (await (await caches.open(k)).keys()).map((r) => new URL(r.url).pathname);

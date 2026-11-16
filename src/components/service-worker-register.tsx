@@ -10,8 +10,35 @@ import { finishPendingSignOut } from "@/lib/offline/browser";
 export function ServiceWorkerRegister() {
   useEffect(() => {
     if (!("serviceWorker" in navigator)) return;
+    const container = navigator.serviceWorker;
     const build = process.env.NEXT_PUBLIC_BUILD_ID ?? "dev";
-    navigator.serviceWorker.register(`/sw.js?v=${encodeURIComponent(build)}`, { scope: "/tech", updateViaCache: "none" }).catch(() => undefined);
+    // The worker answers a warm-up with `warmed`: the shell and the page's own files are saved, so the app opens offline
+    // from now on. `html[data-offline-ready="1"]` and the `fsd:offline-ready` event say so (13.6 may show a chip).
+    const onMessage = (event: MessageEvent) => {
+      if (event.data?.type !== "warmed") return;
+      document.documentElement.dataset.offlineReady = event.data.shell ? "1" : "0";
+      window.dispatchEvent(new CustomEvent("fsd:offline-ready", { detail: { shell: Boolean(event.data.shell) } }));
+    };
+    container.addEventListener("message", onMessage);
+    let cancelled = false;
+    void (async () => {
+      try {
+        await container.register(`/sw.js?v=${encodeURIComponent(build)}`, { scope: "/tech", updateViaCache: "none" });
+        const registration = await container.ready;
+        // On a first visit this page isn't controlled by the worker, so it never saw our requests: hand it the list of
+        // files this page loaded (they come from the browser's own cache) and have it save the shell.
+        if (document.readyState !== "complete") await new Promise((resolve) => window.addEventListener("load", resolve, { once: true }));
+        if (cancelled) return;
+        const urls = performance.getEntriesByType("resource").map((e) => e.name).filter((n) => n.includes("/_next/static/"));
+        registration.active?.postMessage({ type: "warm", urls });
+      } catch {
+        // no service worker (private mode, unsupported): the app still works online
+      }
+    })();
+    return () => {
+      cancelled = true;
+      container.removeEventListener("message", onMessage);
+    };
   }, []);
   return null;
 }

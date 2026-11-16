@@ -1,4 +1,4 @@
-import type { JobStatus, QueuedOp, TechJob, TechNote } from "./types";
+import type { JobStatus, QueuedOp, SyncResult, TechJob, TechNote, WireOp } from "./types";
 
 /**
  * The status rules the phone checks before it queues anything, mirroring `src/lib/job-status.ts` on the server (which
@@ -58,6 +58,35 @@ export function overlay(jobs: TechJob[], queue: QueuedOp[]): TechJob[] {
       job.status = op.to;
       job.statusVersion = op.baseStatusVersion + 1;
       if (op.to === "completed") job.completedAt = op.clientAt;
+    }
+  }
+  return out;
+}
+
+/**
+ * Fold the server's final answers into the saved snapshot, so that removing an acknowledged op from the outbox never
+ * makes the screen fall back to older data (the next snapshot fetch can fail or be slow). For every answered op:
+ * - the job's `status`, `statusVersion` and `version` become the server's when the answer carries its state and that
+ *   state is not older than what is saved (a replay returns the state at the time of the first answer);
+ * - an `applied` or `replayed` note is added (by its server id) unless it is already there.
+ * A refused op changes nothing except taking the server's state from its answer. Pure.
+ */
+export function applyAcknowledged(jobs: TechJob[], answered: { op: WireOp; result: SyncResult }[], nowIso: string): TechJob[] {
+  const out = jobs.map((j) => ({ ...j, notes: [...j.notes] }));
+  const byId = new Map(out.map((j) => [j.id, j]));
+  for (const { op, result } of answered) {
+    const job = byId.get(op.jobId);
+    if (!job) continue;
+    const brief = result.job;
+    if (brief && brief.id === job.id && (brief.statusVersion > job.statusVersion || (brief.statusVersion === job.statusVersion && brief.version >= job.version))) {
+      job.status = brief.status;
+      job.statusVersion = brief.statusVersion;
+      job.version = brief.version;
+      if (brief.status === "completed" && !job.completedAt) job.completedAt = nowIso;
+    }
+    const ok = result.outcome === "applied" || result.outcome === "replayed";
+    if (ok && op.kind === "note.add" && result.noteId && !job.notes.some((n) => n.id === result.noteId)) {
+      job.notes.push({ id: result.noteId, body: op.body, clientAt: op.clientAt, serverAt: nowIso, byMe: true });
     }
   }
   return out;

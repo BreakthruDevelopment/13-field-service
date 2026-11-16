@@ -367,3 +367,52 @@ describe("faults", () => {
     expect(seen).toEqual([engine]);
   });
 });
+
+describe("acknowledged work survives a failed refresh", () => {
+  const brief = (status: string, statusVersion: number, version: number) => ({ id: J, status, statusVersion, version });
+
+  it("after a sync whose snapshot fetch fails, the job stays on_site with the server's statusVersion, the note stays, and the next status op builds on it", async () => {
+    let syncs = 0;
+    const { engine, r } = await started((url, init) => {
+      if (url === "/api/my/jobs") throw new TypeError("connection lost"); // every refresh fails
+      const ops = JSON.parse(String(init?.body)).ops as WireOp[];
+      syncs++;
+      return reply(200, {
+        results: ops.map((o) =>
+          o.kind === "note.add"
+            ? { opId: o.opId, outcome: "applied", noteId: `server-note-${syncs}`, job: brief("scheduled", 1, 3) }
+            : { opId: o.opId, outcome: "applied", job: brief("on_site", 2, 4) },
+        ),
+        serverTime: "t",
+      });
+    });
+    await engine.addNote(J, "Replaced the cartridge.");
+    await engine.setStatus(J, "on_site");
+    await engine.flush();
+    expect(engine.getState().pending).toBe(0);
+    expect(engine.getState().jobs[0]).toMatchObject({ status: "on_site", statusVersion: 2, version: 4 });
+    expect(engine.getState().jobs[0].notes.map((n) => [n.id, n.body, n.pending])).toEqual([["server-note-1", "Replaced the cartridge.", undefined]]);
+    // The saved copy (what a reload shows) has it too.
+    engine.halt();
+    const again = await r.open(USER);
+    await again.load();
+    expect(again.getState().jobs[0]).toMatchObject({ status: "on_site", statusVersion: 2 });
+    // Completing offline now works (a note exists) and carries the right base.
+    await again.setStatus(J, "completed");
+    await again.flush();
+    const completed = JSON.parse(String(r.fetch.mock.calls.filter((c) => c[0] === "/api/sync").at(-1)![1]?.body)).ops[0];
+    expect(completed).toMatchObject({ to: "completed", baseStatusVersion: 2 });
+  });
+
+  it("a refused op's answer still brings the job's real state home", async () => {
+    const { engine } = await started((url, init) => {
+      if (url === "/api/my/jobs") throw new TypeError("offline");
+      const ops = JSON.parse(String(init?.body)).ops as WireOp[];
+      return reply(200, { results: ops.map((o) => ({ opId: o.opId, outcome: "conflict", code: "stale_version", job: brief("en_route", 5, 9) })), serverTime: "t" });
+    });
+    await engine.setStatus(J, "en_route");
+    await engine.flush();
+    expect(engine.getState().jobs[0]).toMatchObject({ status: "en_route", statusVersion: 5, version: 9 });
+    expect(engine.getState().attention).toHaveLength(1);
+  });
+});

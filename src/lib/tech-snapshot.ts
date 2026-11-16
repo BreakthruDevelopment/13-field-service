@@ -14,7 +14,8 @@ import { consumeRate } from "@/lib/usage";
  * cancelled in the last 3 days (so a cancel shows up as a cancel, not as a job that quietly vanished), at most 50.
  * Each carries the customer's name and phone, the site address, access notes and coordinates, and the last 20 notes.
  * Never the customer's email or notes, never another technician's data, never the parts catalog.
- * The body is kept under 256 KB: jobs that don't fit are left out (`truncated`), then older notes are dropped.
+ * The body is kept under 256 KB: jobs that don't fit are left out, then older notes are dropped. `truncated` is true when
+ * any matching job is missing, whether because of the 50-job limit or the byte budget.
  */
 
 export const SNAPSHOT_LIMIT_PER_HOUR = 120;
@@ -92,7 +93,7 @@ export async function loadTechSnapshot(actor: Actor, now: Date = new Date()): Pr
   const horizon = new Date(now.getTime() + SNAPSHOT_SCHEDULE_DAYS * day);
   const recent = new Date(now.getTime() - SNAPSHOT_RECENT_DAYS * day);
   const q = db();
-  const rows = await q
+  const allRows = await q
     .select({
       id: serviceJob.id,
       number: serviceJob.number,
@@ -128,7 +129,10 @@ export async function loadTechSnapshot(actor: Actor, now: Date = new Date()): Pr
       ),
     )
     .orderBy(sql`${serviceJob.scheduledStart} asc nulls last`, desc(serviceJob.number))
-    .limit(SNAPSHOT_MAX_JOBS);
+    // One more than we keep: the extra row only tells us the list is incomplete (`truncated`).
+    .limit(SNAPSHOT_MAX_JOBS + 1);
+  const overflow = allRows.length > SNAPSHOT_MAX_JOBS;
+  const rows = allRows.slice(0, SNAPSHOT_MAX_JOBS);
 
   const ids = rows.map((r) => r.id);
   const ranked = q
@@ -183,7 +187,7 @@ export async function loadTechSnapshot(actor: Actor, now: Date = new Date()): Pr
     notesTruncated: more.has(r.id),
   }));
   const fit = fitSnapshot(jobs);
-  return { userId: actor.id, serverTime: now.toISOString(), jobs: fit.jobs, truncated: fit.truncated };
+  return { userId: actor.id, serverTime: now.toISOString(), jobs: fit.jobs, truncated: fit.truncated || overflow };
 }
 
 /** The weak ETag of the content (not `serverTime`, which always changes): equal for equal snapshots of the same user. */

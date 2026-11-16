@@ -4,7 +4,7 @@
  */
 import { readFileSync } from "node:fs";
 import path from "node:path";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 const SOURCE = readFileSync(path.resolve(__dirname, "../public/sw.js"), "utf8");
 const ORIGIN = "https://app13.example";
@@ -31,7 +31,8 @@ function worker(build = "b1", network: (req: Request) => Promise<Response> | Res
       keys: async () => [...stores.keys()],
       delete: async (n: string) => stores.delete(n),
     },
-    fetch: async (req: Request) => {
+    fetch: async (input: Request | string) => {
+      const req = typeof input === "string" ? new Request(input) : input;
       fetched.push(new URL(req.url).pathname);
       const res = await network(req);
       // A real same-origin network response has type "basic"; a hand-made Response has "default".
@@ -53,8 +54,15 @@ function worker(build = "b1", network: (req: Request) => Promise<Response> | Res
     for (const fn of listeners[type] ?? []) fn({ data, waitUntil: (p: Promise<unknown>) => waits.push(p) });
     await Promise.all(waits);
   };
+  const warm = async (urls: unknown) => {
+    const messages: unknown[] = [];
+    const waits: Promise<unknown>[] = [];
+    for (const fn of listeners.message ?? []) fn({ data: { type: "warm", urls }, source: { postMessage: (m: unknown) => messages.push(m) }, waitUntil: (p: Promise<unknown>) => waits.push(p) });
+    await Promise.all(waits);
+    return messages;
+  };
   const nav = (p: string) => Object.defineProperty(new Request(`${ORIGIN}${p}`), "mode", { value: "navigate" });
-  return { stores, fetched, ask, lifecycle, nav, scope };
+  return { stores, fetched, ask, lifecycle, warm, nav, scope };
 }
 
 const html = (body = "<html>shell</html>") => new Response(body, { status: 200, headers: { "content-type": "text/html; charset=utf-8" } });
@@ -156,5 +164,51 @@ describe("service worker", () => {
     await w.ask(w.nav("/tech"));
     expect(allCachedPaths(w).filter((p) => p.startsWith("/api"))).toEqual([]);
     expect(allCachedPaths(w).sort()).toEqual(["/_next/static/a.js", "/icons/icon-192.png", "/tech"]);
+  });
+});
+
+describe("service worker warm-up (first visit, no second online navigation)", () => {
+  const network = (req: Request) => (new URL(req.url).pathname === "/tech" ? html() : new Response("chunk"));
+
+  it("saves the shell and the files the page loaded, then reports it", async () => {
+    const w = worker("b1", network);
+    const messages = await w.warm([`${ORIGIN}/_next/static/chunks/a.js`, `${ORIGIN}/_next/static/css/b.css`]);
+    expect(messages).toEqual([{ type: "warmed", shell: true, assets: 2 }]);
+    expect(allCachedPaths(w).sort()).toEqual(["/_next/static/chunks/a.js", "/_next/static/css/b.css", "/tech"]);
+    // ...and now an offline navigation works.
+    const offline = worker("b1", () => { throw new TypeError("offline"); });
+    for (const [name, cache] of w.stores) offline.stores.set(name, cache);
+    expect(await (await offline.ask(offline.nav("/tech")))!.text()).toBe("<html>shell</html>");
+  });
+
+  it("ignores anything that isn't this origin's /_next/static, fetches each file once, and skips what is already saved", async () => {
+    const w = worker("b1", network);
+    await w.warm([`${ORIGIN}/_next/static/a.js`, `${ORIGIN}/_next/static/a.js`, `${ORIGIN}/api/my/jobs`, "https://evil.example/_next/static/x.js", "not a url", 42, `${ORIGIN}/board`]);
+    expect(w.fetched.sort()).toEqual(["/_next/static/a.js", "/tech"]);
+    const before = w.fetched.length;
+    await w.warm([`${ORIGIN}/_next/static/a.js`]);
+    expect(w.fetched.length).toBe(before); // shell and chunk already saved
+    expect(allCachedPaths(w).filter((p) => p.startsWith("/api"))).toEqual([]);
+  });
+
+  it("reports shell: false when it can't be saved (offline, signed out) and caches nothing from a redirect", async () => {
+    const down = worker("b1", () => { throw new TypeError("offline"); });
+    expect(await down.warm([])).toEqual([{ type: "warmed", shell: false, assets: 0 }]);
+    const out = worker("b1", (req) => (new URL(req.url).pathname === "/tech" ? new Response(null, { status: 307 }) : new Response("chunk")));
+    expect(await out.warm([`${ORIGIN}/_next/static/a.js`])).toEqual([{ type: "warmed", shell: false, assets: 1 }]);
+    expect(allCachedPaths(out).filter((p) => p === "/tech")).toEqual([]);
+  });
+
+  it("copes with garbage input and caps the list", async () => {
+    const w = worker("b1", network);
+    expect(await w.warm("nope")).toEqual([{ type: "warmed", shell: true, assets: 0 }]);
+    const spy = vi.spyOn(globalThis, "setTimeout").mockImplementation(((fn: () => void) => {
+      fn();
+      return 0;
+    }) as never);
+    const many = Array.from({ length: 400 }, (_, i) => `${ORIGIN}/_next/static/c${i}.js`);
+    const [msg] = (await w.warm(many)) as { assets: number }[];
+    spy.mockRestore();
+    expect(msg.assets).toBe(300);
   });
 });

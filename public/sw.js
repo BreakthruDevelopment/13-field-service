@@ -8,6 +8,9 @@
  * It does not precache a build manifest: that would be ~40 requests on install and trip the API Gateway burst limit.
  * Cache names carry the build id (the `?v=` of this script's URL); `activate` deletes every other `fsd-` cache.
  * `{ type: "wipe" }` from the page (sign out) deletes every cache at once.
+ * `{ type: "warm", urls }` from the page (sent once it has loaded, so a first visit works offline without a second online
+ *   visit): saves the /tech shell if it isn't saved yet and the /_next/static files the page itself loaded (at most 300,
+ *   one every 100 ms, so the API Gateway burst limit is never in play), then answers `{ type: "warmed", shell, assets }`.
  * Tested in test/sw.test.ts with a fake worker scope; keep this file dependency free and ES5-friendly.
  */
 (function (scope) {
@@ -41,7 +44,10 @@
   });
 
   scope.addEventListener("message", function (event) {
-    if (event.data && event.data.type === "wipe") event.waitUntil(deleteAllCaches());
+    var data = event.data;
+    if (!data) return;
+    if (data.type === "wipe") event.waitUntil(deleteAllCaches());
+    else if (data.type === "warm") event.waitUntil(warm(data.urls, event.source));
   });
 
   function isStaticAsset(url) {
@@ -64,22 +70,24 @@
     });
   }
 
+  // Decide what to do with a /tech response. Returns true when it was saved as the shell.
+  function keepShell(res) {
+    // A redirect (to /sign-in, or /waiting for a role that lost access) is never cached, and it means this device
+    // can't be showing a technician's shell any more: drop everything.
+    if (res.redirected || res.type === "opaqueredirect" || res.status === 0 || (res.status >= 300 && res.status < 400) || res.status === 401 || res.status === 403) {
+      return deleteAllCaches().then(function () { return false; });
+    }
+    if (cacheable(res) && /text\/html/.test(res.headers.get("content-type") || "")) {
+      var copy = res.clone();
+      return scope.caches.open(SHELL).then(function (cache) { return cache.put(SHELL_URL, copy); }).then(function () { return true; });
+    }
+    return Promise.resolve(false);
+  }
+
   function shell(request) {
     return scope.fetch(request).then(
       function (res) {
-        // A redirect (to /sign-in, or /waiting for a role that lost access) is never cached, and it means this device
-        // can't be showing a technician's shell any more: drop everything.
-        if (res.redirected || res.type === "opaqueredirect" || res.status === 0 || (res.status >= 300 && res.status < 400)) {
-          return deleteAllCaches().then(function () { return res; });
-        }
-        if (res.status === 401 || res.status === 403) {
-          return deleteAllCaches().then(function () { return res; });
-        }
-        if (cacheable(res) && /text\/html/.test(res.headers.get("content-type") || "")) {
-          var copy = res.clone();
-          scope.caches.open(SHELL).then(function (cache) { return cache.put(SHELL_URL, copy); });
-        }
-        return res;
+        return keepShell(res).then(function () { return res; });
       },
       function () {
         // Offline: the saved shell, if there is one.
@@ -90,6 +98,46 @@
         });
       }
     );
+  }
+
+  var wait = function (ms) { return new Promise(function (resolve) { setTimeout(resolve, ms); }); };
+
+  function warm(urls, source) {
+    var wanted = [];
+    (Array.isArray(urls) ? urls : []).slice(0, 300).forEach(function (u) {
+      try {
+        var url = new URL(String(u), scope.location.origin);
+        if (url.origin === scope.location.origin && url.pathname.indexOf("/_next/static/") === 0 && wanted.indexOf(url.href) < 0) wanted.push(url.href);
+      } catch (e) { /* not a URL */ }
+    });
+    return scope.caches.open(SHELL)
+      .then(function (cache) { return cache.match(SHELL_URL); })
+      .then(function (hit) {
+        if (hit) return true;
+        return scope.fetch(new Request(scope.location.origin + SHELL_URL, { credentials: "same-origin", headers: { accept: "text/html" } }))
+          .then(keepShell)
+          .catch(function () { return false; });
+      })
+      .then(function (shellSaved) {
+        return scope.caches.open(STATIC).then(function (cache) {
+          var chain = Promise.resolve();
+          wanted.forEach(function (href) {
+            chain = chain.then(function () {
+              return cache.match(href).then(function (hit) {
+                if (hit) return;
+                return wait(100)
+                  .then(function () { return scope.fetch(href); })
+                  .then(function (res) { if (cacheable(res)) return cache.put(href, res.clone()); })
+                  .catch(function () { /* one missing file isn't fatal */ });
+              });
+            });
+          });
+          return chain.then(function () { return shellSaved; });
+        });
+      })
+      .then(function (shellSaved) {
+        if (source && source.postMessage) source.postMessage({ type: "warmed", shell: shellSaved, assets: wanted.length });
+      });
   }
 
   scope.addEventListener("fetch", function (event) {

@@ -1,6 +1,7 @@
 import { backoffMs, retryAfterMs } from "./backoff";
 import {
   LocalRuleError,
+  applyAcknowledged,
   cleanNote,
   isWorkTransition,
   overlay,
@@ -331,6 +332,7 @@ export class TechDataEngine {
       }
       const results = new Map((body.results ?? []).map((r) => [r.opId, r]));
       const done: string[] = [];
+      const answered: { op: WireOp; result: SyncResult }[] = [];
       const attention: AttentionItem[] = [];
       let deferred = 0;
       for (const q of batch) {
@@ -340,11 +342,16 @@ export class TechDataEngine {
           continue;
         }
         done.push(q.op.opId);
+        answered.push({ op: q.op, result: r });
         if (r.outcome === "conflict" || r.outcome === "rejected") {
           attention.push({ opId: q.op.opId, op: q.op, label: q.label, outcome: r.outcome, code: r.code ?? "unknown", job: r.job, at: this.env.now() });
         }
       }
-      await this.store.settle(done, attention);
+      // What the answers did goes into the saved snapshot in the same commit that removes the ops from the outbox.
+      // `etag: null` forces the next refresh to be a full read: our fold is an approximation of what the server now holds.
+      const folded = this.snapshot ? { ...this.snapshot, etag: null, jobs: applyAcknowledged(this.snapshot.jobs, answered, new Date(this.env.now()).toISOString()) } : undefined;
+      await this.store.settle(done, attention, folded);
+      if (folded) this.snapshot = folded;
       finalAnswers += done.length;
       this.queue = await this.store.outbox();
       this.attempts = 0;

@@ -97,3 +97,21 @@ describe("triggers", () => {
     void snapshotFor;
   });
 });
+
+describe("applyAcknowledged", () => {
+  const note = { kind: "note.add" as const, opId: "n1", jobId: job().id, clientAt: "2026-11-15T10:00:00.000Z", body: "hi" };
+  it("takes the server's state only when it isn't older than what is saved, and adds an acknowledged note once", async () => {
+    const { applyAcknowledged } = await import("./rules");
+    const base = [job({ statusVersion: 3, version: 5 })];
+    const fresh = applyAcknowledged(base, [{ op: note, result: { opId: "n1", outcome: "applied", noteId: "s1", job: { id: job().id, status: "on_site", statusVersion: 4, version: 6 } } }], "2026-11-15T10:01:00.000Z");
+    expect(fresh[0]).toMatchObject({ status: "on_site", statusVersion: 4, version: 6 });
+    expect(fresh[0].notes).toHaveLength(1);
+    const twice = applyAcknowledged(fresh, [{ op: note, result: { opId: "n1", outcome: "replayed", noteId: "s1" } }], "x");
+    expect(twice[0].notes).toHaveLength(1);
+    const stale = applyAcknowledged(base, [{ op: note, result: { opId: "n1", outcome: "replayed", noteId: "s1", job: { id: job().id, status: "scheduled", statusVersion: 1, version: 2 } } }], "x");
+    expect(stale[0]).toMatchObject({ statusVersion: 3, version: 5, status: "scheduled" });
+    expect(base[0].notes).toHaveLength(0); // pure
+    const refused = applyAcknowledged(base, [{ op: note, result: { opId: "n1", outcome: "rejected", code: "job_cancelled" } }], "x");
+    expect(refused[0].notes).toHaveLength(0);
+  });
+});

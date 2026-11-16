@@ -103,10 +103,13 @@ export class OfflineStore {
   }
 
   /** Remove ops the server gave a final answer to; optionally record refused ones, in the same transaction. */
-  async settle(opIds: string[], attention: AttentionItem[] = []): Promise<void> {
+  async settle(opIds: string[], attention: AttentionItem[] = [], snapshot?: StoredSnapshot): Promise<void> {
     this.guard();
     if (opIds.length === 0 && attention.length === 0) return;
-    await withTx(this.db, ["outbox", "attention"], "readwrite", async (tx) => {
+    // One transaction: the answered ops leave the outbox in the same commit that saves what they did to the snapshot,
+    // so a crash or a failed refresh can never show the old state with nothing queued.
+    await withTx(this.db, ["outbox", "attention", "snapshot"], "readwrite", async (tx) => {
+      if (snapshot) await promisify(tx.objectStore("snapshot").put(snapshot, "current"));
       const outbox = tx.objectStore("outbox");
       const all = (await promisify(outbox.getAll())) as QueuedOp[];
       for (const q of all) if (opIds.includes(q.op.opId)) await promisify(outbox.delete(q.seq!));

@@ -512,6 +512,17 @@ describe.skipIf(!testDatabaseUrl)("offline sync (Postgres)", () => {
       await expect(snap.getTechSnapshot(t3)).rejects.toMatchObject({ status: 429 });
     });
 
+    it("says truncated when more than 50 jobs match, even though the 50 sent fit the byte budget", async () => {
+      const t = t2;
+      await sql`delete from service_job where assignee_id = ${t.id}`;
+      for (let i = 0; i < 51; i++) await newJob(t, { title: `bulk ${i}` });
+      const snapshot = await snap.loadTechSnapshot(t);
+      expect(snapshot.jobs).toHaveLength(50);
+      expect(snapshot.truncated).toBe(true);
+      await sql`delete from service_job where id = ${snapshot.jobs[0].id}`;
+      expect((await snap.loadTechSnapshot(t)).truncated).toBe(false);
+    }, 30_000);
+
     it("fitSnapshot keeps the body under the limit: later jobs go first, then older notes", () => {
       const note_ = (i: number) => ({ id: String(i), body: "x".repeat(1000), clientAt: null, serverAt: "2026-01-01T00:00:00.000Z", byMe: true });
       const job = (i: number) =>
