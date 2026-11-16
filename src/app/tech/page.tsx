@@ -1,12 +1,17 @@
 import type { Metadata } from "next";
-import { PageIntro } from "@/components/ui";
 import { requireRoleOrRedirect } from "@/lib/auth/session";
+import { PART_UNITS } from "@/lib/db/schema";
+import { TechHome } from "./tech-home";
 
 export const metadata: Metadata = { title: "My jobs" };
 export const dynamic = "force-dynamic";
+export const maxDuration = 25;
 
-/** Placeholder so the role redirects land somewhere; the UI issue replaces this page. */
+/**
+ * The cached shell. Job rows are drawn by the client from `useTechData()` after load, so this HTML never contains a
+ * customer's name, phone, address or notes. The service worker can store it.
+ */
 export default async function Page() {
   await requireRoleOrRedirect("technician");
-  return <PageIntro section="My jobs" title="My jobs" description="Your jobs are being built." />;
+  return <TechHome units={[...PART_UNITS]} />;
 }

@@ -49,6 +49,8 @@ manifest=$(curl -fsS "$BASE_URL/manifest.webmanifest") || fail "manifest unreach
 curl -fsS -D - -o /dev/null "$BASE_URL/" | tr -d '\r' | grep -iq '^permissions-policy:.*geolocation=(self)' || fail "Permissions-Policy should allow geolocation for this origin only"
 code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE_URL/tech")
 [ "$code" = "307" ] || fail "signed-out /tech should redirect (307), got $code"
+code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE_URL/waiting")
+[ "$code" = "307" ] || fail "signed-out /waiting should redirect (307), got $code"
 clear_headers=$(curl -s -D - -o /dev/null -X POST -H "origin: $BASE_URL" "$BASE_URL/api/session/clear" | tr -d '\r')
 echo "$clear_headers" | grep -iq '^clear-site-data: "cache", "storage"' || fail "/api/session/clear should answer Clear-Site-Data: $clear_headers"
 pass "service worker is no-store, manifest opens /tech, geolocation is self-only, /api/session/clear sends Clear-Site-Data"
@@ -133,6 +135,22 @@ echo "$page" | grep -q 'Explore breakthruventures.ai' || fail "dispatcher /parts
 code=$(curl -s -o /dev/null -w '%{http_code}' -b "$JAR_T1" "$BASE_URL/parts")
 [ "$code" = "307" ] || fail "technician /parts should redirect (307), got $code"
 pass "dispatcher parts catalog renders; technicians are redirected"
+
+# Technician PWA shell (13.6). The HTML is the cached shell: job rows load on the phone, so the response names the
+# screen and the empty states, not a customer. A new sign-up waits on /waiting.
+page=$(curl -fsS -b "$JAR_T1" "$BASE_URL/tech") || fail "technician /tech did not render"
+echo "$page" | grep -q 'My jobs' || fail "technician /tech missing My jobs"
+echo "$page" | grep -q 'Loading your jobs' || fail "technician /tech should render the shell before job data"
+echo "$page" | grep -q 'Needs attention' || fail "technician /tech missing Needs attention"
+echo "$page" | grep -q 'Explore breakthruventures.ai' || fail "technician /tech missing the shared footer"
+code=$(curl -s -o /dev/null -w '%{http_code}' -b "$JAR_N" "$BASE_URL/tech")
+[ "$code" = "307" ] || fail "a new sign-up /tech should redirect (307), got $code"
+page=$(curl -fsS -b "$JAR_N" "$BASE_URL/waiting") || fail "new sign-up /waiting did not render"
+echo "$page" | grep -q 'An admin needs to give you access' || fail "waiting page should say an admin needs to give access"
+echo "$page" | grep -q 'Explore breakthruventures.ai' || fail "waiting page missing the shared footer"
+code=$(curl -s -o /dev/null -w '%{http_code}' -b "$JAR_T1" "$BASE_URL/waiting")
+[ "$code" = "307" ] || fail "technician /waiting should redirect (307), got $code"
+pass "technician shell and waiting page render for the right roles"
 
 # --- a new sign-up has no role -----------------------------------------------------------------------------------
 

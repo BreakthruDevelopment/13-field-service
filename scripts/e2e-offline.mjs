@@ -80,16 +80,18 @@ try {
   const context = await browser.newContext({ permissions: ["geolocation"], geolocation: { latitude: 30.26721999, longitude: -97.74309999, accuracy: 20 }, viewport: { width: 375, height: 700 } });
   await signIn(context, EMAILS.t1);
   const page = await context.newPage();
+  // 13.6 renders the real screens on the same page. Drive the harness, not those buttons.
+  const harness = page.getByRole("region", { name: "offline e2e harness" });
   const syncResponses = [];
   page.on("response", (r) => {
     if (r.url().endsWith("/api/sync") && r.request().method() === "POST") syncResponses.push(r);
   });
-  const text = (id) => page.getByTestId(id).innerText();
+  const text = (id) => harness.getByTestId(id).innerText();
   const waitText = (id, expected, timeout = 20_000) => page.waitForFunction(([i, e]) => document.querySelector(`[data-testid="${i}"]`)?.textContent === e, [id, expected], { timeout });
 
   await page.goto(`${BASE}/tech`);
   await waitText("ready", "ready");
-  await page.getByTestId("job-title").waitFor();
+  await harness.getByTestId("job-title").waitFor();
   ok("online: the harness shows the technician's job from the snapshot");
   // First visit, no second online navigation: the page hands the worker its file list and the worker saves the shell.
   await page.waitForFunction(() => document.documentElement.dataset.offlineReady === "1", null, { timeout: 30_000 });
@@ -110,11 +112,11 @@ try {
   if ((await text("job-title")) !== `E2E sink ${RUN}`) fail("offline reload should show the saved job");
   ok("offline: reload is served from the cache and shows the saved job");
 
-  await page.getByLabel("note").fill("Offline note: replaced the cartridge.");
-  await page.getByRole("button", { name: "Add note" }).click();
-  await page.getByRole("button", { name: "En route" }).click();
+  await harness.getByLabel("note").fill("Offline note: replaced the cartridge.");
+  await harness.getByRole("button", { name: "Add note" }).click();
+  await harness.getByRole("button", { name: "En route" }).click();
   await waitText("pending", "2");
-  await page.getByRole("button", { name: "Check in at site" }).click();
+  await harness.getByRole("button", { name: "Check in at site" }).click();
   await waitText("pending", "3");
   if ((await text("job-status")) !== "on_site") fail("the screen should show on_site while offline");
   await sleep(2500); // the 2 s debounce fires and fails: ops must stay
@@ -158,8 +160,8 @@ try {
   await signIn(context, EMAILS.t1);
   await page.goto(`${BASE}/tech`);
   await waitText("ready", "ready");
-  await page.getByLabel("note").fill("left on the phone");
-  await page.getByRole("button", { name: "Add note" }).click().catch(() => undefined);
+  await harness.getByLabel("note").fill("left on the phone");
+  await harness.getByRole("button", { name: "Add note" }).click().catch(() => undefined);
   const mine = await page.evaluate(async () => (await indexedDB.databases()).map((d) => d.name));
   if (!mine.some((n) => n?.startsWith("fsd-"))) fail(`technician 1 should have a database: ${mine}`);
   await context.clearCookies(); // the session ended without a sign-out, and someone else signs in
