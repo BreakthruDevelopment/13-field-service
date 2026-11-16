@@ -38,6 +38,51 @@ describe("OfflineStore", () => {
     expect(await store.attention()).toEqual([]);
   });
 
+  it("settle folds into the snapshot as saved at that moment: a snapshot another connection saved just before is the one folded, not overwritten", async () => {
+    const factory = newFactory();
+    const a = await open(factory, "u1");
+    const b = await open(factory, "u1"); // another tab
+    await a.putSnapshot({ ...snapshotFor("u1", [job({ title: "old" })]), rev: 0 });
+    await a.enqueue({ op: noteOp(1), label: "x", createdAt: 1 });
+    const [q] = await a.outbox();
+    const seen: (string | undefined)[] = [];
+    const refreshed = b.putSnapshot({ ...snapshotFor("u1", [job({ title: "refreshed" })]), rev: 1 }); // the other tab saves first
+    const settled = a.settle([q.op.opId], [], (current) => {
+      seen.push(current?.jobs[0].title);
+      return current ? { ...current, rev: (current.rev ?? 0) + 1, jobs: current.jobs.map((j) => ({ ...j, description: "folded" })) } : null;
+    });
+    await Promise.all([refreshed, settled]);
+    expect(seen).toEqual(["refreshed"]);
+    const saved = await a.getSnapshot();
+    expect(saved).toMatchObject({ rev: 2 });
+    expect(saved!.jobs[0]).toMatchObject({ title: "refreshed", description: "folded" });
+  });
+
+  it("opening for a user judges the saved snapshot's age and owner in the same transaction that clears it", async () => {
+    const factory = newFactory();
+    const storage = new MemoryStorage();
+    const a = await open(factory, "u1", storage);
+    await a.putSnapshot({ ...snapshotFor("u1", [job()], 1_000_000), rev: 3 });
+    a.close();
+    const fresh = await open(factory, "u1", storage, () => 1_000_000 + 1000);
+    expect(await fresh.getSnapshot()).toMatchObject({ rev: 3 }); // fresh: kept
+    fresh.close();
+    const stale = await open(factory, "u1", storage, () => 1_000_000 + SNAPSHOT_MAX_AGE_MS + 1);
+    expect(await stale.getSnapshot()).toBeNull();
+  });
+
+  it("readAll returns snapshot, outbox and attention from one moment, ordered", async () => {
+    const store = await open(newFactory(), "u1");
+    await store.putSnapshot(snapshotFor("u1", [job()]));
+    for (const n of [2, 1]) await store.enqueue({ op: noteOp(n), label: "x", createdAt: n });
+    const [first] = await store.outbox();
+    await store.settle([], [{ opId: first.op.opId, op: first.op, label: "x", outcome: "conflict", code: "stale_version", at: 5 }]);
+    const all = await store.readAll();
+    expect(all.snapshot?.userId).toBe("u1");
+    expect(all.outbox.map((q) => q.seq)).toEqual([...all.outbox.map((q) => q.seq)].sort((a, b) => a! - b!));
+    expect(all.attention).toHaveLength(1);
+  });
+
   it("opening for a different user deletes the previous user's database, outbox included", async () => {
     const factory = newFactory();
     const storage = new MemoryStorage();

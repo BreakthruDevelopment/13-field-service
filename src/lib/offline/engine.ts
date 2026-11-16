@@ -153,9 +153,10 @@ export class TechDataEngine {
 
   /** Read the saved snapshot, outbox and attention list. Works with no network; call before anything renders data. */
   async load(): Promise<void> {
-    this.snapshot = await this.store.getSnapshot();
-    this.queue = await this.store.outbox();
-    const attention = await this.store.attention();
+    const all = await this.store.readAll();
+    this.snapshot = all.snapshot;
+    this.queue = all.outbox;
+    const attention = all.attention;
     this.rebuild({ ready: true, attention });
     // Another tab of this user changed the database: take its state (the screen follows it, and our next intent builds on it).
     this.unsubscribe = this.env.broadcast?.subscribe(() => void this.locked(() => this.reloadLocal()).catch(() => undefined)) ?? null;
@@ -171,9 +172,10 @@ export class TechDataEngine {
   /** Re-read the snapshot, outbox and attention list from IndexedDB, the one copy every tab shares. Call inside `locked`. */
   private async reloadLocal(): Promise<void> {
     if (this.halted) return;
-    this.snapshot = await this.store.getSnapshot();
-    this.queue = await this.store.outbox();
-    this.rebuild({ attention: await this.store.attention() });
+    const all = await this.store.readAll();
+    this.snapshot = all.snapshot;
+    this.queue = all.outbox;
+    this.rebuild({ attention: all.attention });
   }
 
   private announce() {
@@ -425,13 +427,15 @@ export class TechDataEngine {
       // What the answers did goes into the saved snapshot in the same commit that removes the ops from the outbox. The
       // snapshot is read fresh (another tab may have refreshed it) and its `rev` moves, so a GET that began earlier is dropped.
       await this.locked(async () => {
-        const current = await this.store.getSnapshot();
+        // The fold happens inside the settle transaction, on the snapshot as saved at that moment: a refreshed snapshot another
+        // tab saved a moment ago is the one acknowledged ops are applied to, never overwritten by an older copy.
         // `etag: null` forces the next refresh to be a full read: our fold is an approximation of what the server now holds.
-        const folded = current
-          ? { ...current, etag: null, rev: (current.rev ?? 0) + 1, jobs: applyAcknowledged(current.jobs, answered, new Date(this.env.now()).toISOString()) }
-          : undefined;
-        await this.store.settle(done, attention, folded);
-        if (folded) this.snapshot = folded;
+        const saved = await this.store.settle(done, attention, (current) =>
+          current
+            ? { ...current, etag: null, rev: (current.rev ?? 0) + 1, jobs: applyAcknowledged(current.jobs, answered, new Date(this.env.now()).toISOString()) }
+            : null,
+        );
+        if (saved) this.snapshot = saved;
       });
       this.announce();
       finalAnswers += done.length;

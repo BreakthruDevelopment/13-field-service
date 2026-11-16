@@ -573,6 +573,34 @@ describe("two tabs refreshing out of order", () => {
   });
 });
 
+describe("two tabs: the sync fold and a refresh from the other tab", () => {
+  it("acknowledged ops fold into the snapshot the other tab just refreshed, and nothing it saved is lost", async () => {
+    let releaseSync: () => void = () => undefined;
+    const refreshed = { userId: USER, serverTime: "2026-11-15T10:00:05.000Z", jobs: [job({ title: "refreshed by tab B" })], truncated: false };
+    const { engine: tabA, r } = await started((url, init) => {
+      if (url === "/api/sync") {
+        const ops = JSON.parse(String(init?.body)).ops as WireOp[];
+        return new Promise<Response>((resolve) => {
+          releaseSync = () => resolve(reply(200, { results: ops.map((o): SyncResult => ({ opId: o.opId, outcome: "applied" })), serverTime: "t" }));
+        });
+      }
+      return reply(200, refreshed, { etag: 'W/"b"' });
+    });
+    const tabB = await r.open(USER);
+    await tabB.load();
+    await tabA.setStatus(J, "en_route");
+    const flushing = tabA.flush({ force: true });
+    await new Promise((x) => setTimeout(x, 20));
+    await tabB.refresh(); // tab B saves a refreshed snapshot while tab A's sync is in flight
+    releaseSync();
+    await flushing;
+    const reopened = await r.open(USER);
+    await reopened.load();
+    expect(reopened.getState().pending).toBe(0);
+    expect(reopened.getState().jobs[0].title).toBe("refreshed by tab B");
+  });
+});
+
 describe("overlapping taps", () => {
   it("two status actions that start before the first is stored chain: the second sees the first's version and depends on it", async () => {
     const { engine, r } = await started();

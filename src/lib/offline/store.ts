@@ -22,6 +22,9 @@ const readRegistry = (storage: KeyValueStorage | undefined): string[] => {
  * by name, and by `meta.owner`, which `openForUser` re-checks. Opening for a user first deletes every other `fsd-*`
  * database, so a phone that changes hands never keeps the previous technician's data.
  */
+/** Returned by an `updateSnapshot` decision to delete the saved snapshot. */
+export const CLEAR = Symbol("clear-snapshot");
+
 export class OfflineStore {
   private closed = false;
 
@@ -50,8 +53,8 @@ export class OfflineStore {
     } catch {
       // storage unavailable: databases() covers it
     }
-    const snap = await store.getSnapshot();
-    if (snap && (snap.userId !== userId || now() - snap.savedAt > SNAPSHOT_MAX_AGE_MS)) await store.clearSnapshot();
+    // Read and (maybe) delete in one transaction: a tab that saved a fresh snapshot a moment ago must not lose it to a stale verdict.
+    await store.updateSnapshot((snap) => (snap && (snap.userId !== userId || now() - snap.savedAt > SNAPSHOT_MAX_AGE_MS) ? CLEAR : null));
     return store;
   }
 
@@ -73,6 +76,7 @@ export class OfflineStore {
     return (await withTx(this.db, ["snapshot"], "readonly", (tx) => promisify(tx.objectStore("snapshot").get("current")))) ?? null;
   }
 
+  /** A blind write, for seeding (tests, first save). Anything that depends on what is saved goes through `updateSnapshot` or `settle`. */
   async putSnapshot(snapshot: StoredSnapshot): Promise<void> {
     this.guard();
     await withTx(this.db, ["snapshot"], "readwrite", (tx) => promisify(tx.objectStore("snapshot").put(snapshot, "current")));
@@ -83,13 +87,17 @@ export class OfflineStore {
    * origin): `decide` sees the snapshot as saved right now and returns what to save, or null to save nothing. Returns the
    * snapshot that is saved after the call. `decide` must be synchronous: an IndexedDB transaction ends when its work awaits anything else.
    */
-  async updateSnapshot(decide: (current: StoredSnapshot | null) => StoredSnapshot | null): Promise<StoredSnapshot | null> {
+  async updateSnapshot(decide: (current: StoredSnapshot | null) => StoredSnapshot | null | typeof CLEAR): Promise<StoredSnapshot | null> {
     this.guard();
     return withTx(this.db, ["snapshot"], "readwrite", async (tx) => {
       const store = tx.objectStore("snapshot");
       const current = ((await promisify(store.get("current"))) as StoredSnapshot | undefined) ?? null;
       const next = decide(current);
       if (next === null) return current;
+      if (next === CLEAR) {
+        await promisify(store.clear());
+        return null;
+      }
       await promisify(store.put(next, "current"));
       return next;
     });
@@ -119,19 +127,41 @@ export class OfflineStore {
     return all.sort((a, b) => a.seq! - b.seq!);
   }
 
-  /** Remove ops the server gave a final answer to; optionally record refused ones, in the same transaction. */
-  async settle(opIds: string[], attention: AttentionItem[] = [], snapshot?: StoredSnapshot): Promise<void> {
+  /**
+   * Remove ops the server gave a final answer to; optionally record refused ones and fold them into the snapshot, all in
+   * the same transaction. `fold` sees the snapshot as saved at that moment (another tab may have refreshed it) and
+   * returns what to save (or null to leave it). It must be synchronous. Returns the snapshot saved afterwards.
+   */
+  async settle(opIds: string[], attention: AttentionItem[] = [], fold?: (current: StoredSnapshot | null) => StoredSnapshot | null): Promise<StoredSnapshot | null> {
     this.guard();
-    if (opIds.length === 0 && attention.length === 0) return;
+    if (opIds.length === 0 && attention.length === 0) return this.getSnapshot();
     // One transaction: the answered ops leave the outbox in the same commit that saves what they did to the snapshot,
     // so a crash or a failed refresh can never show the old state with nothing queued.
-    await withTx(this.db, ["outbox", "attention", "snapshot"], "readwrite", async (tx) => {
-      if (snapshot) await promisify(tx.objectStore("snapshot").put(snapshot, "current"));
+    return withTx(this.db, ["outbox", "attention", "snapshot"], "readwrite", async (tx) => {
+      const snapStore = tx.objectStore("snapshot");
+      let saved = ((await promisify(snapStore.get("current"))) as StoredSnapshot | undefined) ?? null;
+      const folded = fold ? fold(saved) : null;
+      if (folded) {
+        await promisify(snapStore.put(folded, "current"));
+        saved = folded;
+      }
       const outbox = tx.objectStore("outbox");
       const all = (await promisify(outbox.getAll())) as QueuedOp[];
       for (const q of all) if (opIds.includes(q.op.opId)) await promisify(outbox.delete(q.seq!));
       const att = tx.objectStore("attention");
       for (const a of attention) await promisify(att.put(a));
+      return saved;
+    });
+  }
+
+  /** The snapshot, outbox and attention list as of one moment (one read transaction), for a tab that reloads from the shared copy. */
+  async readAll(): Promise<{ snapshot: StoredSnapshot | null; outbox: QueuedOp[]; attention: AttentionItem[] }> {
+    this.guard();
+    return withTx(this.db, ["snapshot", "outbox", "attention"], "readonly", async (tx) => {
+      const snapshot = ((await promisify(tx.objectStore("snapshot").get("current"))) as StoredSnapshot | undefined) ?? null;
+      const outbox = ((await promisify(tx.objectStore("outbox").getAll())) as QueuedOp[]).sort((a, b) => a.seq! - b.seq!);
+      const attention = ((await promisify(tx.objectStore("attention").getAll())) as AttentionItem[]).sort((a, b) => a.at - b.at);
+      return { snapshot, outbox, attention };
     });
   }
 
