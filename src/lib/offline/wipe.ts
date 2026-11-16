@@ -13,6 +13,15 @@ import { deleteDb, listAppDatabases } from "./idb";
 
 export const PENDING_SIGNOUT_KEY = "fsd.pending-signout";
 
+/** True while a sign-out is unfinished on this device: nothing may open the offline database or warm caches meanwhile. */
+export function isSignOutPending(storage: Pick<KeyValueStorage, "getItem"> | undefined): boolean {
+  try {
+    return storage?.getItem(PENDING_SIGNOUT_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
+
 export type CachesLike = { keys(): Promise<string[]>; delete(name: string): Promise<boolean> };
 export type WorkerLike = { postMessage(message: unknown): void };
 export type ServiceWorkerContainerLike = {
@@ -27,6 +36,8 @@ export type WipeEnv = {
   serviceWorker?: ServiceWorkerContainerLike;
   /** Stop every running engine so none writes to a database that is being deleted. */
   haltEngines?: () => void;
+  /** Tell this user's other tabs the device was wiped, so they stop and leave (they would otherwise keep the data on screen). */
+  announceWipe?: () => void;
 };
 
 export type SignOutEnv = WipeEnv & {
@@ -39,6 +50,11 @@ export type SignOutEnv = WipeEnv & {
 
 export async function wipeLocalData(env: WipeEnv): Promise<void> {
   env.haltEngines?.();
+  try {
+    env.announceWipe?.();
+  } catch {
+    // best effort: the wipe itself is what counts
+  }
   const errors: unknown[] = [];
   const attempt = async (work: () => Promise<unknown> | void) => {
     try {
@@ -102,21 +118,31 @@ export async function signOutAndWipe(env: SignOutEnv): Promise<SignOutResult> {
     wiped = false;
   }
   if (env.isOnline() && (await serverSignOut(env))) {
+    // Wipe again: anything that wrote to the device while the server call was in flight goes too.
+    try {
+      await wipeLocalData(env);
+    } catch {
+      wiped = false;
+    }
     if (wiped) env.localStorage?.removeItem(PENDING_SIGNOUT_KEY);
     return { status: "signed_out", unsynced };
   }
   return { status: "wiped_offline", unsynced };
 }
 
-/** On app start: if a sign-out was left unfinished (offline, or interrupted), wipe again and finish it once online. */
+/**
+ * On app start: if a sign-out was left unfinished (offline, or interrupted), finish it once online. The order matters:
+ * the server sign-out FIRST (while it is in flight nothing may open the database: see `isSignOutPending`), then a wipe
+ * after it, and only then the flag is cleared. Returns true when it finished (the caller sends the user to sign-in).
+ */
 export async function finishPendingSignOut(env: SignOutEnv): Promise<boolean> {
-  if (env.localStorage?.getItem(PENDING_SIGNOUT_KEY) !== "1" || !env.isOnline()) return false;
+  if (!isSignOutPending(env.localStorage) || !env.isOnline()) return false;
+  if (!(await serverSignOut(env))) return false;
   try {
     await wipeLocalData(env);
   } catch {
     return false;
   }
-  if (!(await serverSignOut(env))) return false;
   env.localStorage?.removeItem(PENDING_SIGNOUT_KEY);
   return true;
 }

@@ -1,9 +1,10 @@
 "use client";
 
 import { type ReactNode, createContext, useContext, useEffect, useMemo, useState, useSyncExternalStore } from "react";
-import { createBrowserEngine } from "./browser";
+import { createBrowserEngine, leaveForSignIn, onWipedElsewhere } from "./browser";
 import type { EngineState, TechDataEngine } from "./engine";
 import { attachTriggers } from "./triggers";
+import { isSignOutPending } from "./wipe";
 import type { CheckInLocation, JobStatus } from "./types";
 
 /**
@@ -33,8 +34,18 @@ export function TechDataProvider({ userId, children }: { userId: string; childre
     let cancelled = false;
     let detach: (() => void) | undefined;
     let created: TechDataEngine | undefined;
+    // Signed out in another tab: this one stops, drops what it shows and leaves for sign-in.
+    const stopListening = onWipedElsewhere(() => {
+      cancelled = true;
+      detach?.();
+      created?.halt();
+      setEngine(null);
+      leaveForSignIn();
+    });
     void (async () => {
       try {
+        // A sign-out is unfinished on this device: don't open the database, download a snapshot or flush anything.
+        if (isSignOutPending(window.localStorage)) return;
         const e = await createBrowserEngine(userId);
         if (cancelled) return void e.halt();
         created = e;
@@ -49,6 +60,7 @@ export function TechDataProvider({ userId, children }: { userId: string; childre
     })();
     return () => {
       cancelled = true;
+      stopListening();
       detach?.();
       created?.halt();
       setEngine(null);

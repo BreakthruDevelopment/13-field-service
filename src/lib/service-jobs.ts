@@ -603,12 +603,17 @@ export async function appendNote(
   job: { id: string },
   authorId: string,
   note: { body: string; opId?: string | null; clientAt?: Date | null },
-): Promise<{ id: string; created: boolean }> {
+): Promise<{ id: string; created: boolean; reused?: boolean }> {
   // The 200-note cap counts then inserts, so the job row lock is taken here too (re-entrant when the caller already holds it).
   await tx.select({ id: serviceJob.id }).from(serviceJob).where(eq(serviceJob.id, job.id)).for("update");
   if (note.opId) {
-    const [existing] = await tx.select({ id: jobNote.id }).from(jobNote).where(and(eq(jobNote.authorId, authorId), eq(jobNote.opId, note.opId)));
-    if (existing) return { id: existing.id, created: false };
+    const [existing] = await tx
+      .select({ id: jobNote.id, jobId: jobNote.jobId, body: jobNote.body })
+      .from(jobNote)
+      .where(and(eq(jobNote.authorId, authorId), eq(jobNote.opId, note.opId)));
+    // A retry carries the same job and text. The same id on another job or with other text is a different request:
+    // `reused` tells the caller not to answer it with the first note.
+    if (existing) return { id: existing.id, created: false, ...(existing.jobId !== job.id || existing.body !== note.body ? { reused: true } : {}) };
   }
   const [{ n }] = await tx.select({ n: count() }).from(jobNote).where(eq(jobNote.jobId, job.id));
   if (n >= MAX_NOTES_PER_JOB) throw new ConflictError("This job has the maximum number of notes.");
@@ -618,9 +623,12 @@ export async function appendNote(
     .onConflictDoNothing()
     .returning({ id: jobNote.id });
   if (row) return { id: row.id, created: true };
-  const [existing] = await tx.select({ id: jobNote.id }).from(jobNote).where(and(eq(jobNote.authorId, authorId), eq(jobNote.opId, note.opId ?? "")));
+  const [existing] = await tx
+    .select({ id: jobNote.id, jobId: jobNote.jobId, body: jobNote.body })
+    .from(jobNote)
+    .where(and(eq(jobNote.authorId, authorId), eq(jobNote.opId, note.opId ?? "")));
   if (!existing) throw new ConflictError();
-  return { id: existing.id, created: false };
+  return { id: existing.id, created: false, ...(existing.jobId !== job.id || existing.body !== note.body ? { reused: true } : {}) };
 }
 
 /** POST /api/jobs/:id/notes: a dispatcher on any job, a technician on their own (offline notes go through /api/sync). */
@@ -631,7 +639,8 @@ export async function addJobNote(actor: Actor, id: string, input: unknown): Prom
   return writeTx(actor, async (tx) => {
     const job = await lockJob(tx, actor, jobId);
     assertCan(actor, "create", "job_note", { assigneeId: job.assigneeId });
-    const { created } = await appendNote(tx, job, actor.id, { body: data.body, opId: data.opId, clientAt: data.clientAt ? new Date(data.clientAt) : null });
+    const { created, reused } = await appendNote(tx, job, actor.id, { body: data.body, opId: data.opId, clientAt: data.clientAt ? new Date(data.clientAt) : null });
+    if (reused) throw new ConflictError("That operation id was already used for a different note.");
     return { job: await loadJobDetail(tx, actor, jobId), created };
   });
 }

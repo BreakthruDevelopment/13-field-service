@@ -21,7 +21,7 @@ import type { AttentionItem, CheckInLocation, JobStatus, QueuedOp, Snapshot, Sto
  * - **Ops leave the outbox only on a final answer** (`applied`, `replayed`, `conflict`, `rejected`). A network error, a
  *   5xx, a 429, a 401 and `deferred` keep them. `conflict` and `rejected` are recorded in "Needs attention" first.
  * - **The outbox is bound to its user.** Every batch carries `ownerId`; the server refuses (409 `owner_mismatch`) a batch
- *   from another session user and the engine then wipes everything. A snapshot for a different user does the same.
+ *   from another session user and the engine then deletes its own database and stops. A snapshot for a different user does the same.
  * - **One flush at a time** (a Web Lock across tabs, plus a single-flight promise), batches of at most 50 ops / 60 KB,
  *   exponential backoff with full jitter (2 s to 5 min, honouring `Retry-After`).
  */
@@ -44,8 +44,11 @@ export type EngineEnv = {
   exclusive?: <T>(name: string, fn: () => Promise<T>) => Promise<T>;
   /** Tells the other tabs of this user that the shared database changed (they reload), and hears the same from them. */
   broadcast?: { post: () => void; subscribe: (onChange: () => void) => () => void };
-  /** Delete every local trace (databases, caches). Called when the session user turns out to be someone else. */
-  wipe: () => Promise<void>;
+  /**
+   * Delete THIS user's database only. Called when the session turns out to belong to someone else: that someone's own
+   * database (and queued work) may be on the phone right now and must not be touched.
+   */
+  discardOwn: (userId: string) => Promise<void>;
   /** Called once when the engine stops (unmount, sign-out, wipe), so a registry can forget it. */
   onHalt?: (engine: TechDataEngine) => void;
 };
@@ -331,7 +334,7 @@ export class TechDataEngine {
 
   private async ownerChanged() {
     this.halt();
-    await this.env.wipe();
+    await this.env.discardOwn(this.userId);
   }
 
   private async flushLocked(): Promise<void> {

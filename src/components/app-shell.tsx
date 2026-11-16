@@ -70,7 +70,7 @@ export async function AppShell({ children, nav }: { children: ReactNode; nav?: R
           <div className="flex items-center gap-3">
             {user ? (
               <>
-                <span className="hidden max-w-40 truncate text-sm text-muted md:inline" title={user.email}>
+                <span className="hidden max-w-40 truncate text-sm text-muted md:inline">
                   {user.name}
                 </span>
                 <SignOutButton />

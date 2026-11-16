@@ -45,6 +45,8 @@ export const SYNC_BUDGET_MS = 8000;
 export const SYNC_LIMIT_PER_HOUR = 30;
 /** A lock wait longer than this defers the op (and the rest of the batch) instead of holding the request. */
 export const SYNC_LOCK_TIMEOUT_MS = 3000;
+/** Replayed batches (every op already answered) are free of `sync`, but have their own, more generous, hourly allowance. */
+export const SYNC_REPLAY_LIMIT_PER_HOUR = 120;
 
 const { syncOp } = schema;
 
@@ -175,6 +177,8 @@ async function applyOp(tx: Tx, actor: Actor, op: ParsedOp): Promise<Applied> {
     try {
       // A savepoint: a refused note leaves nothing behind, and the ledger row below still commits.
       const note = await tx.transaction((sp) => appendNote(sp, job, actor.id, { body: op.body, opId: op.opId, clientAt: new Date(op.clientAt) }));
+      // The same op id already made a note on another job or with other text (online, or earlier): not a replay of this op.
+      if (note.reused) return { outcome: "rejected", code: "op_id_reused", job: brief(job) };
       return { outcome: "applied", noteId: note.id, job: brief(job) };
     } catch (err) {
       if (err instanceof ConflictError) return { outcome: "rejected", code: "note_limit", job: brief(job) };
@@ -225,7 +229,7 @@ async function runOp(actor: Actor, op: ParsedOp, deviceId: string | null, opts: 
     if (claimed.length === 0) {
       // Waited for any concurrent holder of this op id above, so the row is committed and final now.
       const [prev] = await tx.select().from(syncOp).where(and(eq(syncOp.actorId, actor.id), eq(syncOp.opId, op.opId)));
-      if (!prev || !prev.outcome) throw new ConflictError("That was busy. Try again.");
+      if (!prev || !prev.outcome) throw new SyncError(409, "retry", "That was busy. Try again.");
       if (prev.kind !== op.kind || prev.jobId !== op.jobId || prev.payloadHash !== hash) return { opId: op.opId, outcome: "rejected", code: "op_id_reused" };
       const stored = (prev.result ?? {}) as Stored;
       return prev.outcome === "applied"
@@ -273,11 +277,15 @@ export async function syncBatch(
   let rateEventId: string | null;
   try {
     rateEventId = await db().transaction(async (tx) => {
+      await tx.execute(sql`select set_config('lock_timeout', ${String(SYNC_LOCK_TIMEOUT_MS)}, true)`);
       await assertActorCurrent(tx, actor);
       return consumeRate(tx, actor.id, "sync", SYNC_LIMIT_PER_HOUR, "Too many syncs. Try again in a few minutes.");
     });
   } catch (err) {
+    if (pgCode(err) === "55P03") throw new SyncError(409, "retry", "That was busy. Try again.");
     if (!(err instanceof TooManyRequestsError) || !(await isPureReplay(actor, data.ops))) throw err;
+    // At the limit, a batch of pure replays (a lost response being retried) is answered from the ledger against its own allowance.
+    await db().transaction((tx) => consumeRate(tx, actor.id, "sync_replay", SYNC_REPLAY_LIMIT_PER_HOUR, "Too many syncs. Try again in a few minutes."));
     rateEventId = null;
   }
   const replayOnly = rateEventId === null;
@@ -319,7 +327,18 @@ export async function syncBatch(
     if (rateEventId && results.every((r) => r.outcome === "deferred" || r.outcome === "replayed" || r.replayed)) await refund(actor, rateEventId);
     throw err;
   }
-  if (fresh === 0 && rateEventId) await refund(actor, rateEventId);
+  if (fresh === 0 && rateEventId) {
+    // Replays don't cost a `sync`, but they aren't unlimited: they spend the replay allowance, and when that is used up
+    // the charge stays. A batch that was only deferred is refunded outright.
+    if (results.some((r) => r.replayed || r.outcome === "replayed")) {
+      const replayCharged = await db()
+        .transaction((tx) => consumeRate(tx, actor.id, "sync_replay", SYNC_REPLAY_LIMIT_PER_HOUR, "Too many syncs."))
+        .then(() => true, () => false);
+      if (replayCharged) await refund(actor, rateEventId);
+    } else {
+      await refund(actor, rateEventId);
+    }
+  }
   log.info("sync.batch", { ops: data.ops.length, ...counts, ms: clock() - started });
   return { results, serverTime: new Date().toISOString() };
 }

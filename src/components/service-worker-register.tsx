@@ -1,7 +1,8 @@
 "use client";
 
 import { useEffect } from "react";
-import { finishPendingSignOut } from "@/lib/offline/browser";
+import { finishPendingSignOut, leaveForSignIn } from "@/lib/offline/browser";
+import { isSignOutPending } from "@/lib/offline/wipe";
 
 /**
  * Registers `/sw.js` for the technician area only (`scope: "/tech"`). The build id in the query makes every build a new
@@ -39,6 +40,8 @@ export function ServiceWorkerRegister() {
     };
     const warm = async () => {
       try {
+        // Signing out on this device: saving the shell and files now would put data back after the wipe.
+        if (isSignOutPending(window.localStorage)) return;
         const registration = await container.ready;
         const worker = await settled(registration);
         if (!worker) return;
@@ -98,8 +101,10 @@ export function ServiceWorkerRegister() {
 /** Finishes a sign-out that was done offline (the local wipe happened then; the server session ends now). Renders nothing. */
 export function PendingSignOut() {
   useEffect(() => {
-    void finishPendingSignOut().catch(() => undefined);
-    const onOnline = () => void finishPendingSignOut().catch(() => undefined);
+    // Once the server sign-out and the second wipe are done, leave: the session is gone.
+    const finish = () => void finishPendingSignOut().then((done) => done && leaveForSignIn()).catch(() => undefined);
+    finish();
+    const onOnline = finish;
     window.addEventListener("online", onOnline);
     return () => window.removeEventListener("online", onOnline);
   }, []);

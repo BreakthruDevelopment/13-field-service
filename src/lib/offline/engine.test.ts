@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { BACKOFF_MAX_MS } from "./backoff";
 import { MAX_BATCH_OPS, takeBatch } from "./engine";
 import { LocalRuleError } from "./rules";
+import { dbNameFor, openDb } from "./idb";
 import { job, reply, rig, snapshotFor } from "./test-helpers";
 import type { SyncResult, WireOp } from "./types";
 
@@ -299,7 +300,7 @@ describe("flushing", () => {
 });
 
 describe("owner binding", () => {
-  it("a 409 owner_mismatch wipes everything and stops the engine, with nothing applied", async () => {
+  it("a 409 owner_mismatch deletes its own database and stops the engine, with nothing applied", async () => {
     const { engine, r } = await started((url) => (url === "/api/sync" ? reply(409, { error: "x", code: "owner_mismatch" }) : reply(200, {})));
     await engine.addNote(J, "belongs to someone else's session");
     await engine.flush();
@@ -308,7 +309,30 @@ describe("owner binding", () => {
     expect(engine.getState().status).toBe("wiped");
   });
 
-  it("a snapshot for a different user wipes everything instead of being kept", async () => {
+  it("an owner mismatch deletes only this user's database: another technician's database and unsynced work on the phone survive", async () => {
+    const { engine, r } = await started(() => reply(200, { userId: "tech-b", serverTime: "t", jobs: [job()], truncated: false }));
+    // Technician B signs in on another tab: their database (with queued work) now exists next to the stale tab's.
+    const b = await openDb(r.factory, dbNameFor("tech-b"));
+    b.close();
+    await engine.refresh();
+    expect(engine.isHalted).toBe(true);
+    const names = (await r.factory.databases()).map((d) => d.name);
+    expect(names).toContain(dbNameFor("tech-b"));
+    expect(names).not.toContain(dbNameFor(USER));
+  });
+
+  it("the same goes for a 409 owner_mismatch on sync", async () => {
+    const { engine, r } = await started((url) => (url === "/api/sync" ? reply(409, { error: "x", code: "owner_mismatch" }) : reply(200, {})));
+    await engine.addNote(J, "queued");
+    const b = await openDb(r.factory, dbNameFor("tech-b"));
+    b.close();
+    await engine.flush();
+    const names = (await r.factory.databases()).map((d) => d.name);
+    expect(names).toContain(dbNameFor("tech-b"));
+    expect(names).not.toContain(dbNameFor(USER));
+  });
+
+  it("a snapshot for a different user stops the engine instead of being kept", async () => {
     const { engine, r } = await started(() => reply(200, { userId: "another-user", serverTime: "t", jobs: [job()], truncated: false }));
     await engine.refresh();
     expect(r.wiped.n).toBe(1);

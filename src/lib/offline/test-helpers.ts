@@ -1,6 +1,7 @@
 /** Shared fixtures for the offline client tests (not a test file). */
 import { IDBFactory } from "fake-indexeddb";
 import { TechDataEngine, type EngineEnv } from "./engine";
+import { dbNameFor, deleteDb } from "./idb";
 import { OfflineStore } from "./store";
 import type { StoredSnapshot, TechJob } from "./types";
 
@@ -78,8 +79,9 @@ export function rig(vi: typeof import("vitest").vi, fetchImpl: (url: string, ini
       const t = timers[h as number];
       if (t) t.cleared = true;
     },
-    wipe: async () => {
+    discardOwn: async (userId) => {
       wiped.n++;
+      await deleteDb(factory, dbNameFor(userId));
     },
   };
   return {

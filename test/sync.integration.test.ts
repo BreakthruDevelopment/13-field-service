@@ -435,6 +435,24 @@ describe.skipIf(!testDatabaseUrl)("offline sync (Postgres)", () => {
       expect(await count("job_note", job.id)).toBe(1);
     });
 
+    it("replays have their own allowance: free of `sync` under the limit, capped, and when it is spent the charge stays", async () => {
+      const job = await newJob(t2);
+      await sql`delete from rate_event where user_id = ${t2.id}`;
+      const n = note(job.id, "lost once");
+      await run(t2, [n]);
+      const kinds = async () => (await rows(sql`select kind, count(*)::int as n from rate_event where user_id = ${t2.id} group by kind`)).reduce((a, r) => ({ ...a, [String(r.kind)]: r.n }), {} as Record<string, unknown>);
+      expect(await kinds()).toEqual({ sync: 1 });
+      await run(t2, [n]); // a replay under the limit: the sync charge moves to the replay allowance
+      expect(await kinds()).toEqual({ sync: 1, sync_replay: 1 });
+      // Spend the whole replay allowance: another replay keeps its `sync` charge instead of being free.
+      await sql`insert into rate_event (user_id, kind) select ${t2.id}, 'sync_replay' from generate_series(1, ${S.SYNC_REPLAY_LIMIT_PER_HOUR - 1})`;
+      await run(t2, [n]);
+      expect((await kinds()).sync).toBe(2);
+      // At the sync limit with the replay allowance spent: even a pure replay is a 429.
+      await sql`insert into rate_event (user_id, kind) select ${t2.id}, 'sync' from generate_series(1, ${S.SYNC_LIMIT_PER_HOUR - 2})`;
+      await expect(run(t2, [n])).rejects.toMatchObject({ status: 429 });
+    });
+
     it("a replay-only request never processes a new op, even if the ledger row it relied on goes away before the op runs", async () => {
       const job = await newJob(t2);
       await sql`delete from rate_event where user_id = ${t2.id}`;
@@ -454,6 +472,40 @@ describe.skipIf(!testDatabaseUrl)("offline sync (Postgres)", () => {
       // Now that it is a new op, it needs a flush: refused at the limit.
       await expect(run(t2, [n])).rejects.toMatchObject({ status: 429 });
     });
+  });
+
+  describe("op id reuse across a note's job and text", () => {
+    it("an op id already used online for a note on job A is rejected on job B, or with other text, and never answered with the first note", async () => {
+      const a = await newJob(t2);
+      const b = await newJob(t2);
+      await sql`delete from rate_event where user_id = ${t2.id}`;
+      const [onB, onA, honest] = [uuid(), uuid(), uuid()];
+      for (const id of [onB, onA, honest]) await jobs.addJobNote(t2, a.id, { body: "online note", opId: id });
+      const other = await run(t2, [{ kind: "note.add", opId: onB, jobId: b.id, clientAt: at(), body: "different body" }]);
+      expect(other.results[0]).toMatchObject({ outcome: "rejected", code: "op_id_reused" });
+      expect(await count("job_note", b.id)).toBe(0);
+      const sameJobOtherText = await run(t2, [{ kind: "note.add", opId: onA, jobId: a.id, clientAt: at(), body: "edited text" }]);
+      expect(sameJobOtherText.results[0]).toMatchObject({ outcome: "rejected", code: "op_id_reused" });
+      // The honest retry (same job and text) is still the replay it always was.
+      const same = await run(t2, [{ kind: "note.add", opId: honest, jobId: a.id, clientAt: at(), body: "online note" }]);
+      expect(same.results[0].outcome).toBe("applied");
+      expect(await count("job_note", a.id)).toBe(3);
+      // And online, the reuse is a 409 rather than a silent "created: false".
+      await expect(jobs.addJobNote(t2, b.id, { body: "another", opId: onB })).rejects.toMatchObject({ status: 409 });
+    });
+  });
+
+  describe("a busy user row", () => {
+    it("a charge that waits on a locked user row gives up after the lock timeout with 409 retry", async () => {
+      const job = await newJob(t2); // before the lock: inserting a job takes a key-share lock on the technician's row
+      await expect(
+        sql.begin(async (tx) => {
+          await tx`select id from "user" where id = ${t2.id} for update`;
+          const err = await run(t2, [note(job.id)]).catch((e) => e);
+          throw err; // rolls the lock back and hands the error out
+        }),
+      ).rejects.toMatchObject({ status: 409, code: "retry" });
+    }, 15_000);
   });
 
   describe("races", () => {

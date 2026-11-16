@@ -74,6 +74,18 @@ describe("ServiceWorkerRegister", () => {
     cleanup();
   });
 
+  it("while a sign-out is pending it does not warm the caches", async () => {
+    const active = new Worker("activated");
+    const registration = { installing: null, waiting: null, active };
+    container.ready = Promise.resolve(registration);
+    container.register.mockResolvedValue(registration);
+    (window as unknown as { localStorage: unknown }).localStorage = { getItem: (k: string) => (k === "fsd.pending-signout" ? "1" : null) };
+    const cleanup = await mount();
+    await flush();
+    expect(active.sent).toEqual([]);
+    cleanup();
+  });
+
   it("a controller change invalidates readiness and warms again", async () => {
     const active = new Worker("activated");
     const registration = { installing: null, waiting: null, active };

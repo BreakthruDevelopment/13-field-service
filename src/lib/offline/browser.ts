@@ -2,8 +2,9 @@
 
 import { signOut } from "@/lib/auth/client";
 import { TechDataEngine, type EngineEnv } from "./engine";
+import { dbNameFor, deleteDb } from "./idb";
 import { OfflineStore } from "./store";
-import { type SignOutEnv, type SignOutResult, type WipeEnv, finishPendingSignOut as finish, signOutAndWipe as signOutAndWipeWith, wipeLocalData } from "./wipe";
+import { type SignOutEnv, type SignOutResult, type WipeEnv, finishPendingSignOut as finish, signOutAndWipe as signOutAndWipeWith } from "./wipe";
 
 /** The real browser bindings for the framework-free offline core. Only client code imports this file. */
 
@@ -14,6 +15,26 @@ export const haltAllEngines = () => {
   engines.clear();
 };
 
+const WIPE_CHANNEL = "fsd-wipe";
+const TAB_ID = typeof crypto !== "undefined" && "randomUUID" in crypto ? crypto.randomUUID() : String(Math.random());
+
+function announceWipe() {
+  if (typeof BroadcastChannel === "undefined") return;
+  const channel = new BroadcastChannel(WIPE_CHANNEL);
+  channel.postMessage({ from: TAB_ID });
+  channel.close();
+}
+
+/** Call `onWipe` when ANOTHER tab of this browser wipes the device (sign-out). Returns the unsubscribe. */
+export function onWipedElsewhere(onWipe: () => void): () => void {
+  if (typeof BroadcastChannel === "undefined") return () => undefined;
+  const channel = new BroadcastChannel(WIPE_CHANNEL);
+  channel.onmessage = (e: MessageEvent) => {
+    if (e.data?.from !== TAB_ID) onWipe();
+  };
+  return () => channel.close();
+}
+
 function wipeEnv(): WipeEnv {
   return {
     indexedDB: window.indexedDB,
@@ -21,6 +42,7 @@ function wipeEnv(): WipeEnv {
     localStorage: window.localStorage,
     serviceWorker: "serviceWorker" in navigator ? navigator.serviceWorker : undefined,
     haltEngines: haltAllEngines,
+    announceWipe,
   };
 }
 
@@ -65,7 +87,10 @@ export async function createBrowserEngine(userId: string): Promise<TechDataEngin
               },
             };
           })(),
-    wipe: () => wipeLocalData(wipeEnv()),
+    discardOwn: async (id) => {
+      // Not the registry: it may now name another user's database, which is not ours to touch or forget.
+      await deleteDb(window.indexedDB, dbNameFor(id));
+    },
     onHalt: (e) => void engines.delete(e),
   };
   const engine = new TechDataEngine(store, env);
@@ -83,4 +108,9 @@ export function signOutAndWipe(): Promise<SignOutResult> {
 /** Run on every page load: finishes a sign-out that was left half done offline. */
 export function finishPendingSignOut(): Promise<boolean> {
   return finish(signOutEnv());
+}
+
+/** A full page load of the sign-in page (not a client navigation): it drops everything this tab still holds in memory. */
+export function leaveForSignIn(): void {
+  window.location.replace(new URL("/sign-in", window.location.href));
 }

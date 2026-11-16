@@ -170,6 +170,47 @@ try {
   if (dbs.length !== 1 || !dbs[0].includes(encodeURIComponent(t2Id))) fail(`only technician 2's database should remain: ${dbs}`);
   ok("another technician on the same phone: the previous user's database is gone, only their own remains");
 
+  // An unfinished sign-out: the server call is slow and /api/session/clear is blocked. While the flag is set, a second tab
+  // must not open IndexedDB, download the snapshot or warm caches; when the server sign-out is done, the device is wiped again.
+  await context.route("**/api/auth/sign-out", async (route) => {
+    await sleep(4_000);
+    await route.continue();
+  });
+  await context.route("**/api/session/clear", (route) => route.abort());
+  const snapshotFetches = [];
+  context.on("request", (req) => {
+    if (req.url().includes("/api/my/jobs")) snapshotFetches.push(Date.now());
+  });
+  await page.getByRole("button", { name: "Sign out" }).click();
+  await page.waitForFunction(() => localStorage.getItem("fsd.pending-signout") === "1", null, { timeout: 5_000 });
+  const second = await context.newPage();
+  const fetchesBefore = snapshotFetches.length;
+  await second.goto(`${BASE}/tech`);
+  await sleep(2_000);
+  const during = await second.evaluate(async () => ({
+    dbs: (await indexedDB.databases()).map((d) => d.name).filter((n) => n?.startsWith("fsd-")),
+    ready: document.documentElement.dataset.offlineReady ?? null,
+    pending: localStorage.getItem("fsd.pending-signout"),
+    url: location.pathname,
+  }));
+  if (during.url === "/tech" && during.pending === "1") {
+    if (during.dbs.length || during.ready === "1") fail(`while a sign-out is pending nothing may be opened or warmed: ${JSON.stringify(during)}`);
+    if (snapshotFetches.length !== fetchesBefore) fail("while a sign-out is pending no snapshot may be downloaded");
+  }
+  await page.waitForURL("**/sign-in", { timeout: 20_000 });
+  await sleep(1_500);
+  for (const p of [page, second]) {
+    const after = await p.evaluate(async () => ({
+      dbs: (await indexedDB.databases()).map((d) => d.name).filter((n) => n?.startsWith("fsd-")),
+      // A tab that was still loading may re-cache public static files after the wipe; the shell and anything else may not stay.
+      caches: (await Promise.all((await caches.keys()).map(async (k) => (await (await caches.open(k)).keys()).map((r) => new URL(r.url).pathname)))).flat().filter((p) => !p.startsWith("/_next/static/")),
+      pending: localStorage.getItem("fsd.pending-signout"),
+    }));
+    if (after.dbs.length || after.caches.length) fail(`a slow sign-out must still end with a wiped device: ${JSON.stringify(after)}`);
+  }
+  ok("unfinished sign-out: a second tab opens no database, downloads no snapshot and warms no cache; the device ends wiped");
+  await second.close();
+
   console.log("E2E PASS");
 } finally {
   await browser.close();

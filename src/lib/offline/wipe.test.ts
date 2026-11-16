@@ -1,9 +1,9 @@
 import "fake-indexeddb/auto";
 import { describe, expect, it, vi } from "vitest";
-import { listAppDatabases } from "./idb";
+import { listAppDatabases, openDb } from "./idb";
 import { OfflineStore } from "./store";
 import { MemoryStorage, job, newFactory, snapshotFor } from "./test-helpers";
-import { PENDING_SIGNOUT_KEY, type SignOutEnv, finishPendingSignOut, signOutAndWipe, wipeLocalData } from "./wipe";
+import { PENDING_SIGNOUT_KEY, type SignOutEnv, finishPendingSignOut, isSignOutPending, signOutAndWipe, wipeLocalData } from "./wipe";
 import type { NoteOp } from "./types";
 
 const op = (n: number): NoteOp => ({ kind: "note.add", opId: `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`, jobId: "j", clientAt: "2026-11-15T10:00:00.000Z", body: `n${n}` });
@@ -125,6 +125,42 @@ describe("signOutAndWipe", () => {
     expect(d.calls).toContain("fetch /api/session/clear");
     expect(d.storage.getItem(PENDING_SIGNOUT_KEY)).toBeNull();
     expect(await finishPendingSignOut(d.env)).toBe(false); // nothing left to finish
+  });
+
+  it("finishing a pending sign-out signs out on the server first and wipes again after it, so nothing written meanwhile survives", async () => {
+    const d = await device(false);
+    await signOutAndWipe(d.env);
+    d.env.online = true;
+    let flagDuringSignOut: string | null = null;
+    const env = {
+      ...d.env,
+      signOut: vi.fn(async () => {
+        flagDuringSignOut = d.storage.getItem(PENDING_SIGNOUT_KEY);
+        (await openDb(d.factory, "fsd-late")).close(); // something opened the database while the call was in flight
+        d.caches.store.set("late", new Map());
+      }),
+    };
+    expect(await finishPendingSignOut(env)).toBe(true);
+    expect(flagDuringSignOut).toBe("1"); // the flag (which keeps the app from opening the database) is held until the end
+    expect(await listAppDatabases(d.factory, [])).toEqual([]);
+    expect(await d.caches.keys()).toEqual([]);
+    expect(d.storage.getItem(PENDING_SIGNOUT_KEY)).toBeNull();
+  });
+
+  it("a server sign-out that fails leaves the flag set so the app keeps its hands off the database", async () => {
+    const d = await device(false);
+    await signOutAndWipe(d.env);
+    d.env.online = true;
+    expect(await finishPendingSignOut({ ...d.env, signOut: vi.fn(async () => ({ error: "x" })) })).toBe(false);
+    expect(isSignOutPending(d.storage)).toBe(true);
+  });
+
+  it("a wipe announces itself to the other tabs once", async () => {
+    const d = await device();
+    const announceWipe = vi.fn();
+    await wipeLocalData({ ...d.env, announceWipe });
+    expect(announceWipe).toHaveBeenCalledTimes(1);
+    await wipeLocalData({ ...d.env, announceWipe: () => { throw new Error("no channel"); } }); // never fails the wipe
   });
 
   it("a failed server sign-out keeps the pending flag (and the wipe stays done)", async () => {
