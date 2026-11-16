@@ -529,6 +529,30 @@ describe("two tabs refreshing out of order", () => {
     expect(tabA.getState().jobs[0].title).toBe("new"); // and tab A shows what is saved, not what it was just sent
   });
 
+  it("both tabs' answers landing in the same tick, newer first, leave the newer snapshot in IndexedDB", async () => {
+    const release: Record<string, () => void> = {};
+    const { engine: tabA, r } = await started((url, init) => {
+      void init;
+      if (url !== "/api/my/jobs") return reply(200, {});
+      return new Promise<Response>((resolve) => {
+        const which = Object.keys(release).length === 0 ? "old" : "new";
+        release[which] = () => resolve(reply(200, snap(which, which === "old" ? "2026-11-15T10:00:00.000Z" : "2026-11-15T10:00:05.000Z"), { etag: `W/"${which}"` }));
+      });
+    });
+    const tabB = await r.open(USER);
+    await tabB.load();
+    const a = tabA.refresh(false); // asked first, will be answered second (and is the older state)
+    await new Promise((x) => setTimeout(x, 10));
+    const b = tabB.refresh(false);
+    await new Promise((x) => setTimeout(x, 10));
+    release.new(); // the newer answer first...
+    release.old(); // ...and the older one in the same tick
+    await Promise.all([a, b]);
+    const reopened = await r.open(USER);
+    await reopened.load();
+    expect(reopened.getState().jobs[0].title).toBe("new");
+  });
+
   it("an older answer is dropped by its server time even when the revision hasn't moved", async () => {
     let release: () => void = () => undefined;
     const { engine, r } = await started(

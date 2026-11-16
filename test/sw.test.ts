@@ -201,8 +201,9 @@ describe("service worker warm-up (first visit, no second online navigation)", ()
     const down = worker("b1", () => { throw new TypeError("offline"); });
     expect(await down.warm([])).toEqual([{ type: "warmed", shell: false, assets: 0, missing: 0, ready: false }]);
     const out = worker("b1", (req) => (new URL(req.url).pathname === "/tech" ? new Response(null, { status: 307 }) : new Response("chunk")));
-    expect(await out.warm([`${ORIGIN}/_next/static/a.js`])).toEqual([{ type: "warmed", shell: false, assets: 1, missing: 0, ready: false }]);
-    expect(allCachedPaths(out).filter((p) => p === "/tech")).toEqual([]);
+    expect(await out.warm([`${ORIGIN}/_next/static/a.js`])).toEqual([{ type: "warmed", shell: false, assets: 1, missing: 1, ready: false }]);
+    // The session ended: the redirect wiped everything (bumping the generation), so the warm-up saves nothing at all.
+    expect([...out.stores.keys()]).toEqual([]);
   });
 
   it("is not ready while a file is missing (the connection dropped half way), and a later warm-up completes it", async () => {
@@ -291,6 +292,31 @@ describe("a wipe during in-flight work", () => {
     await w.lifecycle("message", { type: "wipe" });
     g.open();
     expect(await (await answer)!.text()).toBe("chunk");
+    await settle();
+    expect([...w.stores.keys()]).toEqual([]);
+  });
+
+  it("a warm-up holding an authenticated shell while a navigation is redirected to sign-in (the session ended) caches nothing when released", async () => {
+    const g = gate();
+    let held = true;
+    const w = worker("b1", async (req) => {
+      if (new URL(req.url).pathname === "/tech" && held) {
+        held = false; // only the first /tech request (the warm-up's) is held
+        await g.promise;
+        return html();
+      }
+      if (new URL(req.url).pathname === "/tech") {
+        const res = new Response("<html>sign in</html>", { status: 200, headers: { "content-type": "text/html" } });
+        Object.defineProperty(res, "redirected", { value: true });
+        return res;
+      }
+      return new Response("chunk");
+    });
+    const warming = w.warm([`${ORIGIN}/_next/static/chunks/a.js`]);
+    await new Promise((r) => setTimeout(r, 20));
+    await w.ask(w.nav("/tech")); // redirected: the worker drops every cache and bumps its generation
+    g.open(); // the held, authenticated answer arrives late
+    await warming;
     await settle();
     expect([...w.stores.keys()]).toEqual([]);
   });

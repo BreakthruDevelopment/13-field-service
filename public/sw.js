@@ -103,7 +103,7 @@
     // A redirect (to /sign-in, or /waiting for a role that lost access) is never cached, and it means this device
     // can't be showing a technician's shell any more: drop everything.
     if (res.redirected || res.type === "opaqueredirect" || res.status === 0 || (res.status >= 300 && res.status < 400) || res.status === 401 || res.status === 403) {
-      return deleteAllCaches().then(function () { return false; });
+      return wipeAll().then(function () { return false; });
     }
     if (cacheable(res) && /text\/html/.test(res.headers.get("content-type") || "")) {
       var copy = res.clone();

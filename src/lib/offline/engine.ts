@@ -494,27 +494,22 @@ export class TechDataEngine {
     const etag = res.headers.get("etag");
     let stale = false;
     await this.locked(async () => {
-      const current = await this.store.getSnapshot();
-      // Acknowledged ops were folded in (here or in another tab) since this request began: it read older state.
-      if ((current?.rev ?? 0) !== startRev) {
-        stale = true;
-        return;
-      }
-      // The saved snapshot is shared by every tab. A response that is older than what is saved (another tab's refresh
-      // was answered after this request began, but this one's answer came back later) must not overwrite it.
-      if (body !== null && current && Date.parse(body.serverTime) < Date.parse(current.serverTime)) {
-        this.snapshot = current;
-        this.rebuild();
-        return;
-      }
-      if (body === null) {
-        if (!current) return;
-        this.snapshot = { ...current, savedAt: this.env.now() };
-      } else {
+      // The compare and the write are one IndexedDB transaction, so two tabs whose answers land in the same tick can't
+      // interleave a read, a read, a write and a write: whoever commits second sees what the first saved.
+      const saved = await this.store.updateSnapshot((current) => {
+        // Acknowledged ops were folded in (here or in another tab) since this request began: it read older state.
+        if ((current?.rev ?? 0) !== startRev) {
+          stale = true;
+          return null;
+        }
+        // The saved snapshot is shared by every tab. A response older than what is saved must not overwrite it.
+        if (body !== null && current && Date.parse(body.serverTime) < Date.parse(current.serverTime)) return null;
+        if (body === null) return current ? { ...current, savedAt: this.env.now() } : null;
         // Saving advances the shared revision, so every other tab's request still in flight is recognised as older.
-        this.snapshot = { ...body, savedAt: this.env.now(), etag, rev: (current?.rev ?? 0) + 1 };
-      }
-      await this.store.putSnapshot(this.snapshot);
+        return { ...body, savedAt: this.env.now(), etag, rev: (current?.rev ?? 0) + 1 };
+      });
+      if (stale) return;
+      if (saved) this.snapshot = saved;
       this.rebuild();
     });
     if (stale) {

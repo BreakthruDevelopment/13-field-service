@@ -78,6 +78,23 @@ export class OfflineStore {
     await withTx(this.db, ["snapshot"], "readwrite", (tx) => promisify(tx.objectStore("snapshot").put(snapshot, "current")));
   }
 
+  /**
+   * Compare-and-write in ONE readwrite transaction (IndexedDB serialises such transactions across every tab of the
+   * origin): `decide` sees the snapshot as saved right now and returns what to save, or null to save nothing. Returns the
+   * snapshot that is saved after the call. `decide` must be synchronous: an IndexedDB transaction ends when its work awaits anything else.
+   */
+  async updateSnapshot(decide: (current: StoredSnapshot | null) => StoredSnapshot | null): Promise<StoredSnapshot | null> {
+    this.guard();
+    return withTx(this.db, ["snapshot"], "readwrite", async (tx) => {
+      const store = tx.objectStore("snapshot");
+      const current = ((await promisify(store.get("current"))) as StoredSnapshot | undefined) ?? null;
+      const next = decide(current);
+      if (next === null) return current;
+      await promisify(store.put(next, "current"));
+      return next;
+    });
+  }
+
   async clearSnapshot(): Promise<void> {
     this.guard();
     await withTx(this.db, ["snapshot"], "readwrite", (tx) => promisify(tx.objectStore("snapshot").clear()));
