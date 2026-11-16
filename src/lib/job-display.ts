@@ -99,27 +99,56 @@ function tzOffsetMs(instant: Date, tz: string): number {
   return asUtc - instant.getTime();
 }
 
+/** `Date.UTC` maps years 0-99 into the 1900s; keep the year the caller actually typed. */
+function utcWallClock(year: number, month: number, day: number, hour: number, minute: number): number {
+  const ms = Date.UTC(year, month - 1, day, hour, minute, 0);
+  if (year >= 0 && year < 100) {
+    const d = new Date(ms);
+    d.setUTCFullYear(year);
+    return d.getTime();
+  }
+  return ms;
+}
+
 /**
- * Convert a wall-clock `YYYY-MM-DDTHH:mm` in `tz` to an ISO-8601 UTC string.
- * Returns null when the local string or time zone is unusable.
+ * The outcome of reading a `datetime-local` value:
+ * - `invalid` — not a `YYYY-MM-DDTHH:mm` wall clock on a real day, or an unusable time zone.
+ * - `nonexistent` — a real-looking clock time that the zone skips when the clocks spring forward
+ *   (02:30 on 2026-03-08 in America/Chicago). We refuse it rather than silently pick 01:30 or 03:30:
+ *   on a dispatch board a quietly shifted window sends a technician to a customer at the wrong hour.
+ *   An ambiguous time (the hour that repeats when the clocks fall back) is NOT rejected: both readings
+ *   exist, and we take the first (still-DST) one, the same choice the browser and `Temporal` make.
  */
-export function zonedLocalToIso(local: string, tz: string): string | null {
+export type ZonedLocalResult = { ok: true; iso: string } | { ok: false; reason: "invalid" | "nonexistent" };
+
+/** Convert a wall-clock `YYYY-MM-DDTHH:mm` in `tz` to an ISO-8601 UTC string, saying why when it can't. */
+export function resolveZonedLocal(local: string, tz: string): ZonedLocalResult {
   const m = LOCAL_RE.exec(local);
-  if (!m || !isTimeZone(tz)) return null;
+  if (!m || !isTimeZone(tz)) return { ok: false, reason: "invalid" };
   const year = Number(m[1]);
   const month = Number(m[2]);
   const day = Number(m[3]);
   const hour = Number(m[4]);
   const minute = Number(m[5]);
-  if (month < 1 || month > 12 || day < 1 || day > 31 || hour > 23 || minute > 59) return null;
-  const utcGuess = Date.UTC(year, month - 1, day, hour, minute, 0);
-  const offset1 = tzOffsetMs(new Date(utcGuess), tz);
-  let instant = utcGuess - offset1;
-  const offset2 = tzOffsetMs(new Date(instant), tz);
-  instant = Date.UTC(year, month - 1, day, hour, minute, 0) - offset2;
-  const result = new Date(instant);
-  if (Number.isNaN(result.getTime())) return null;
-  return result.toISOString();
+  if (!isCalendarDate(`${m[1]}-${m[2]}-${m[3]}`) || hour > 23 || minute > 59) return { ok: false, reason: "invalid" };
+  const wall = utcWallClock(year, month, day, hour, minute);
+  const offset1 = tzOffsetMs(new Date(wall), tz);
+  const offset2 = tzOffsetMs(new Date(wall - offset1), tz);
+  const result = new Date(wall - offset2);
+  if (Number.isNaN(result.getTime())) return { ok: false, reason: "invalid" };
+  const iso = result.toISOString();
+  // A skipped clock time has no instant: converting back lands on a different wall clock.
+  if (isoToZonedLocal(iso, tz) !== local) return { ok: false, reason: "nonexistent" };
+  return { ok: true, iso };
+}
+
+/**
+ * Convert a wall-clock `YYYY-MM-DDTHH:mm` in `tz` to an ISO-8601 UTC string.
+ * Returns null when the local string or time zone is unusable, or the clock time doesn't exist in `tz`.
+ */
+export function zonedLocalToIso(local: string, tz: string): string | null {
+  const result = resolveZonedLocal(local, tz);
+  return result.ok ? result.iso : null;
 }
 
 function pad(n: number): string {
@@ -154,9 +183,50 @@ function formatTime(iso: string, tz: string): string {
   }).format(instant);
 }
 
-/** Short window for a card, e.g. "9:00–11:00 AM". Empty window → "No window". */
-export function formatWindow(start: string | null, end: string | null, tz: string): string {
+function formatDate(iso: string, tz: string, withYear: boolean): string {
+  const instant = new Date(iso);
+  if (Number.isNaN(instant.getTime())) return "";
+  const zone = isTimeZone(tz) ? tz : "UTC";
+  return new Intl.DateTimeFormat("en-US", {
+    timeZone: zone,
+    month: "short",
+    day: "numeric",
+    ...(withYear ? { year: "numeric" } : {}),
+  }).format(instant);
+}
+
+/** The calendar day an instant falls on in `tz`, as `YYYY-MM-DD`. */
+function dayOf(iso: string, tz: string): string {
+  const instant = new Date(iso);
+  return Number.isNaN(instant.getTime()) ? "" : todayInTimeZone(tz, instant);
+}
+
+/**
+ * A job's window for a card or a list row, e.g. "9:00 AM–11:00 AM".
+ *
+ * The date is shown whenever the window is NOT on the day being displayed, and always when no day is given.
+ * The board's unassigned tray holds jobs from any date (`getBoard`) and `/jobs` lists every day at once, so a
+ * bare clock time there reads as today and sends a technician out on the wrong day.
+ * Empty window → "No window".
+ */
+export function formatWindow(
+  start: string | null,
+  end: string | null,
+  tz: string,
+  opts: { onDate?: string | null; now?: Date } = {},
+): string {
   if (!start && !end) return "No window";
-  if (start && end) return `${formatTime(start, tz)}–${formatTime(end, tz)}`;
-  return formatTime(start ?? end ?? "", tz);
+  const onDate = opts.onDate && isCalendarDate(opts.onDate) ? opts.onDate : null;
+  const refYear = (onDate ?? todayInTimeZone(tz, opts.now ?? new Date())).slice(0, 4);
+  const label = (iso: string, sameAs: string | null) => {
+    const day = dayOf(iso, tz);
+    const time = formatTime(iso, tz);
+    if (!day || (sameAs && day === sameAs)) return time;
+    return `${formatDate(iso, tz, day.slice(0, 4) !== refYear)}, ${time}`;
+  };
+  if (start && end) {
+    // The end repeats its date only when the window runs past midnight.
+    return `${label(start, onDate)}–${label(end, dayOf(start, tz))}`;
+  }
+  return label(start ?? end ?? "", onDate);
 }

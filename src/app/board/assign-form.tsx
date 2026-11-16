@@ -1,8 +1,9 @@
 "use client";
 
-import { useActionState, useState } from "react";
-import { useRouter } from "next/navigation";
+import { useActionState, useRef, useState } from "react";
+import { unstable_rethrow, useRouter } from "next/navigation";
 import { buttonPrimary, buttonSecondary, inputClass, labelClass } from "@/components/ui/styles";
+import { type KeyedOp, opFor } from "@/lib/client-op";
 import { type AssignState, assignJobAction } from "./actions";
 
 function FormError({ message }: { message?: string }) {
@@ -31,15 +32,29 @@ export function AssignForm({
 }) {
   const router = useRouter();
   const [open, setOpen] = useState(false);
+  // One op id per assignment the dispatcher meant to make. It survives a lost response (the catch below leaves it
+  // alone), so the retry replays it and the server answers with the assignment that already landed.
+  const op = useRef<KeyedOp | null>(null);
   const [state, action, pending] = useActionState<AssignState, FormData>(async (prev, form) => {
+    const payload = {
+      jobId,
+      assigneeId: form.get("assigneeId"),
+      scheduledStart: form.get("scheduledStart"),
+      scheduledEnd: form.get("scheduledEnd"),
+    };
+    op.current = opFor(op.current, payload);
+    form.set("clientOpId", op.current.id);
     try {
       const result = await assignJobAction(prev, form);
-      if (result.ok) {
-        setOpen(false);
-        router.refresh();
-      }
+      // The server answered (ok, conflict or validation): this intent is finished with its id.
+      op.current = null;
+      if (result.ok) setOpen(false);
+      // A conflict means the version in this form is stale, so the board has to catch up before the next try —
+      // otherwise every retry fails the same way until the 60-second poll comes round.
+      if (result.ok || result.conflict) router.refresh();
       return result;
-    } catch {
+    } catch (err) {
+      unstable_rethrow(err);
       return { error: "Couldn't reach the server. Try again." };
     }
   }, {});

@@ -291,10 +291,24 @@ const version = z.number().int().min(1);
 
 /** PATCH /api/jobs/:id. Every op carries the `version` the client last saw; a stale one is a 409. */
 export const jobPatchInput = z.discriminatedUnion("op", [
-  z.strictObject({ op: z.literal("assign"), version, assigneeId: idText, scheduledStart: when.optional(), scheduledEnd: when.optional() }).superRefine((v, ctx) => {
-    if (Boolean(v.scheduledStart) !== Boolean(v.scheduledEnd)) ctx.addIssue({ code: "custom", path: ["scheduledEnd"], message: "Give both scheduledStart and scheduledEnd, or neither" });
-    refineWindow(v, ctx);
-  }),
+  z
+    .strictObject({
+      op: z.literal("assign"),
+      version,
+      assigneeId: idText,
+      scheduledStart: when.optional(),
+      scheduledEnd: when.optional(),
+      /**
+       * One id per user intent (`opFor` in `src/lib/client-op.ts`). A retry after a lost response replays it and
+       * gets the first assignment back instead of a false "someone else changed this job" from the stale version.
+       * Enforced by `job_event_actor_op_uidx` on (actor_id, op_id).
+       */
+      opId: uuid.optional(),
+    })
+    .superRefine((v, ctx) => {
+      if (Boolean(v.scheduledStart) !== Boolean(v.scheduledEnd)) ctx.addIssue({ code: "custom", path: ["scheduledEnd"], message: "Give both scheduledStart and scheduledEnd, or neither" });
+      refineWindow(v, ctx);
+    }),
   z.strictObject({ op: z.literal("unassign"), version }),
   z.strictObject({ op: z.literal("reschedule"), version, ...windowFields }).superRefine(refineWindow),
   z.strictObject({ op: z.literal("status"), version, to: z.enum(JOB_STATUSES) }),
@@ -525,6 +539,20 @@ export async function updateJob(actor: Actor, id: string, input: unknown): Promi
     if (techToCheck) await tx.select({ id: user.id }).from(user).where(eq(user.id, techToCheck)).for("share");
     const job = await lockJob(tx, actor, jobId);
     if (patch.op === "reopen" && job.assigneeId !== techToCheck) throw new ConflictError("The job changed while reopening. Try again.");
+    // A replay of an assignment that already landed (the response was lost, the user pressed Assign again) answers with
+    // the job as that assignment left it. Checked under the row lock and BEFORE the version guard: the client's version
+    // is one behind precisely because its own write succeeded, and a conflict there would be a lie it can never escape.
+    if (patch.op === "assign" && patch.opId) {
+      const [done] = await tx
+        .select({ jobId: jobEvent.jobId })
+        .from(jobEvent)
+        .where(and(eq(jobEvent.actorId, actor.id), eq(jobEvent.opId, patch.opId)));
+      if (done) {
+        // The same id on another job is a different request, not a retry.
+        if (done.jobId !== jobId) throw new ConflictError("That operation id was already used for a different assignment.");
+        return loadJobDetail(tx, actor, jobId);
+      }
+    }
     if (job.version !== patch.version) throw new VersionConflictError(await loadJobDetail(tx, actor, jobId));
     const now = new Date();
     const bump = { version: job.version + 1, updatedAt: now };
@@ -540,7 +568,8 @@ export async function updateJob(actor: Actor, id: string, input: unknown): Promi
         const changed = job.assigneeId !== patch.assigneeId || job.status === "unassigned";
         const to: JobStatus = changed ? "scheduled" : job.status;
         await set({ assigneeId: patch.assigneeId, status: to, scheduledStart: start, scheduledEnd: end, statusVersion: job.statusVersion + (changed ? 1 : 0) });
-        await insertEvent(tx, { jobId, actorId: actor.id, kind: "assigned", from: job.status, to });
+        // The op id lands on the event row, where `job_event_actor_op_uidx` makes a second attempt impossible.
+        await insertEvent(tx, { jobId, actorId: actor.id, kind: "assigned", from: job.status, to, opId: patch.opId });
         break;
       }
       case "unassign": {

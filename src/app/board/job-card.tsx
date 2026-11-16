@@ -28,7 +28,8 @@ export function JobCard({
       </h3>
       <p className="min-w-0 text-sm [overflow-wrap:anywhere]">{job.customer.name}</p>
       <p className="min-w-0 text-sm text-muted [overflow-wrap:anywhere]">{job.site.address}</p>
-      <p className="text-sm">{formatWindow(job.scheduledStart, job.scheduledEnd, tz)}</p>
+      {/* `date` is the day this board shows: a tray job from another day keeps its date. */}
+      <p className="text-sm">{formatWindow(job.scheduledStart, job.scheduledEnd, tz, { onDate: date })}</p>
       <div className="flex flex-wrap gap-2">
         <JobStatusBadge status={job.status} />
         <JobPriorityBadge priority={job.priority as JobPriority} />

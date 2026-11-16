@@ -6,6 +6,7 @@ import {
   isoToZonedLocal,
   jobPriorityTone,
   jobStatusTone,
+  resolveZonedLocal,
   shiftCalendarDate,
   todayInTimeZone,
   zonedLocalToIso,
@@ -61,6 +62,40 @@ describe("zoned local datetime", () => {
   it("rejects junk", () => {
     expect(zonedLocalToIso("09:00", "UTC")).toBeNull();
     expect(zonedLocalToIso("2026-11-16T09:00", "nope")).toBeNull();
+    expect(resolveZonedLocal("2026-02-30T09:00", "UTC")).toEqual({ ok: false, reason: "invalid" });
+  });
+
+  // America/Chicago 2026: forward 02:00 -> 03:00 on Mar 8, back 02:00 -> 01:00 on Nov 1.
+  it("refuses a clock time the spring-forward skips instead of moving it an hour", () => {
+    expect(resolveZonedLocal("2026-03-08T02:30", "America/Chicago")).toEqual({ ok: false, reason: "nonexistent" });
+    expect(zonedLocalToIso("2026-03-08T02:30", "America/Chicago")).toBeNull();
+    // The hours either side of the gap are untouched: 01:30 is CST (−6), 03:30 is CDT (−5).
+    expect(zonedLocalToIso("2026-03-08T01:30", "America/Chicago")).toBe("2026-03-08T07:30:00.000Z");
+    expect(zonedLocalToIso("2026-03-08T03:30", "America/Chicago")).toBe("2026-03-08T08:30:00.000Z");
+  });
+
+  it("takes the first reading of an hour the fall-back repeats", () => {
+    // 01:30 happens twice: 06:30Z as CDT, then 07:30Z as CST. We keep the earlier instant, and it round-trips.
+    const iso = zonedLocalToIso("2026-11-01T01:30", "America/Chicago");
+    expect(iso).toBe("2026-11-01T06:30:00.000Z");
+    expect(isoToZonedLocal(iso!, "America/Chicago")).toBe("2026-11-01T01:30");
+    expect(isoToZonedLocal("2026-11-01T07:30:00.000Z", "America/Chicago")).toBe("2026-11-01T01:30");
+  });
+
+  it("handles midnight, including the midnight a DST day starts with", () => {
+    expect(zonedLocalToIso("2026-11-16T00:00", "America/Chicago")).toBe("2026-11-16T06:00:00.000Z");
+    expect(zonedLocalToIso("2026-03-08T00:30", "America/Chicago")).toBe("2026-03-08T06:30:00.000Z");
+    expect(zonedLocalToIso("2026-11-01T00:30", "America/Chicago")).toBe("2026-11-01T05:30:00.000Z");
+  });
+
+  it("round-trips either side of a date boundary, where the UTC day differs from the local one", () => {
+    for (const local of ["2026-11-16T23:30", "2026-11-16T00:30", "2026-03-07T23:30", "2026-03-08T00:30"]) {
+      const iso = zonedLocalToIso(local, "America/Chicago");
+      expect(iso).toBeTruthy();
+      expect(isoToZonedLocal(iso!, "America/Chicago")).toBe(local);
+    }
+    // 23:30 local is already the next UTC day.
+    expect(zonedLocalToIso("2026-11-16T23:30", "America/Chicago")).toBe("2026-11-17T05:30:00.000Z");
   });
 });
 
@@ -80,6 +115,44 @@ describe("labels", () => {
   });
 });
 
+describe("formatWindow dates", () => {
+  const tz = "America/Chicago";
+  const now = new Date("2026-11-16T12:00:00.000Z");
+  // 2026-11-17 07:00–08:00 local, the tray job the board showed as a bare "7:00 AM–8:00 AM".
+  const start = "2026-11-17T13:00:00.000Z";
+  const end = "2026-11-17T14:00:00.000Z";
+
+  it("shows clock times only when the window is on the day being displayed", () => {
+    expect(formatWindow(start, end, tz, { onDate: "2026-11-17" })).toBe("7:00 AM–8:00 AM");
+  });
+
+  it("shows the date when the window is on another day, as in the unassigned tray", () => {
+    expect(formatWindow(start, end, tz, { onDate: "2026-11-16" })).toBe("Nov 17, 7:00 AM–8:00 AM");
+  });
+
+  it("always shows the date with no day to compare against, as in the jobs list", () => {
+    expect(formatWindow(start, end, tz, { now })).toBe("Nov 17, 7:00 AM–8:00 AM");
+    expect(formatWindow(start, null, tz, { now })).toBe("Nov 17, 7:00 AM");
+    expect(formatWindow(null, null, tz, { now })).toBe("No window");
+  });
+
+  it("repeats the date on the end only when the window runs past midnight", () => {
+    expect(formatWindow("2026-11-17T05:30:00.000Z", "2026-11-17T06:30:00.000Z", tz, { now })).toBe(
+      "Nov 16, 11:30 PM–Nov 17, 12:30 AM",
+    );
+  });
+
+  it("adds the year when the window is not in the year being displayed", () => {
+    expect(formatWindow("2027-01-02T15:00:00.000Z", "2027-01-02T16:00:00.000Z", tz, { onDate: "2026-11-16" })).toBe(
+      "Jan 2, 2027, 9:00 AM–10:00 AM",
+    );
+  });
+
+  it("ignores a day that isn't a real calendar date", () => {
+    expect(formatWindow(start, end, tz, { onDate: "nope", now })).toBe("Nov 17, 7:00 AM–8:00 AM");
+  });
+});
+
 describe("startVisiblePoll", () => {
   function harness(start: "visible" | "hidden") {
     const listeners = new Map<string, () => void>();
@@ -95,7 +168,7 @@ describe("startVisiblePoll", () => {
         ticks.push(fn);
         return ticks.length;
       },
-      clearInterval: (_id: number) => {
+      clearInterval: () => {
         ticks = [];
       },
     };

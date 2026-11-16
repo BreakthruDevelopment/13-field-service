@@ -6,7 +6,7 @@ import { ZodError } from "zod";
 import { ForbiddenError, UnauthorizedError } from "@/lib/auth/rbac";
 import { requireRole } from "@/lib/auth/session";
 import { HttpError } from "@/lib/errors";
-import { JOB_PRIORITY_LABELS, type JobPriority, isTimeZone, todayInTimeZone, zonedLocalToIso } from "@/lib/job-display";
+import { JOB_PRIORITY_LABELS, type JobPriority, isTimeZone, resolveZonedLocal, todayInTimeZone } from "@/lib/job-display";
 import { createJob } from "@/lib/service-jobs";
 
 export type NewJobValues = {
@@ -72,13 +72,28 @@ function fail(err: unknown, values?: NewJobValues): NewJobState {
   throw err;
 }
 
+/** The window as an instant, or the error to show for `field`. A skipped clock time is refused, not quietly moved. */
+function windowValue(raw: string, tz: string, field: string): { iso?: string } | { error: string } {
+  if (!raw) return {};
+  const result = resolveZonedLocal(raw, tz);
+  if (result.ok) return { iso: result.iso };
+  return {
+    error:
+      result.reason === "nonexistent"
+        ? `${field}: that clock time doesn't exist on this date — the clocks move forward. Pick a time before or after the change.`
+        : `${field}: enter a valid date and time.`,
+  };
+}
+
 export async function createJobAction(_prev: NewJobState, form: FormData): Promise<NewJobState> {
   const values = valuesOf(form);
   const tz = isTimeZone(values.tz) ? values.tz : "UTC";
-  const scheduledStart = values.scheduledStart.trim() ? zonedLocalToIso(values.scheduledStart.trim(), tz) : undefined;
-  const scheduledEnd = values.scheduledEnd.trim() ? zonedLocalToIso(values.scheduledEnd.trim(), tz) : undefined;
-  if (values.scheduledStart.trim() && !scheduledStart) return { error: "Start: enter a valid date and time.", values };
-  if (values.scheduledEnd.trim() && !scheduledEnd) return { error: "End: enter a valid date and time.", values };
+  const start = windowValue(values.scheduledStart.trim(), tz, "Start");
+  if ("error" in start) return { error: start.error, values };
+  const end = windowValue(values.scheduledEnd.trim(), tz, "End");
+  if ("error" in end) return { error: end.error, values };
+  const scheduledStart = start.iso;
+  const scheduledEnd = end.iso;
 
   const priority = (Object.keys(JOB_PRIORITY_LABELS) as JobPriority[]).includes(values.priority as JobPriority)
     ? (values.priority as JobPriority)
