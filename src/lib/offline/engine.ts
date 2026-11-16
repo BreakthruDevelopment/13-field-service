@@ -172,6 +172,17 @@ export class TechDataEngine {
     return job;
   }
 
+  /**
+   * User intents run one at a time, from reading the local state to having it stored and rebuilt: two taps that overlap
+   * (before the first IndexedDB write finishes) would otherwise both read the same `statusVersion` and `dependsOn`.
+   */
+  private intents: Promise<unknown> = Promise.resolve();
+  private serialize<T>(work: () => Promise<T>): Promise<T> {
+    const run = this.intents.then(work, work);
+    this.intents = run.catch(() => undefined);
+    return run;
+  }
+
   private async enqueue(op: WireOp, job: TechJob): Promise<string> {
     const item = { op, label: `#${job.number} ${job.title}`.slice(0, 160), createdAt: this.env.now() };
     await this.store.enqueue(item);
@@ -182,11 +193,13 @@ export class TechDataEngine {
   }
 
   /** Queue a note. Pass the same `opId` on a retry of the same tap. Resolves with the op id once it is stored. */
-  async addNote(jobId: string, body: string, opId?: string): Promise<string> {
-    const text = cleanNote(body);
-    const job = this.job(jobId);
-    if (job.status === "cancelled") throw new LocalRuleError("job_cancelled", "This job was cancelled.");
-    return this.enqueue({ kind: "note.add", opId: opId ?? this.env.newId(), jobId, clientAt: new Date(this.env.now()).toISOString(), body: text }, job);
+  addNote(jobId: string, body: string, opId?: string): Promise<string> {
+    return this.serialize(async () => {
+      const text = cleanNote(body);
+      const job = this.job(jobId);
+      if (job.status === "cancelled") throw new LocalRuleError("job_cancelled", "This job was cancelled.");
+      return this.enqueue({ kind: "note.add", opId: opId ?? this.env.newId(), jobId, clientAt: new Date(this.env.now()).toISOString(), body: text }, job);
+    });
   }
 
   /**
@@ -194,25 +207,27 @@ export class TechDataEngine {
    * The base is the job's *local* `statusVersion` (raised by this phone's own queued status ops) and a second op on the
    * same job depends on the previous one.
    */
-  async setStatus(jobId: string, to: JobStatus, opts: { location?: CheckInLocation | null; opId?: string } = {}): Promise<string> {
-    const job = this.job(jobId);
-    if (opts.location && to !== "on_site") throw new LocalRuleError("location_only_on_site", "A location can only be sent when checking in on site.");
-    if (!isWorkTransition(job.status, to)) throw new LocalRuleError("transition_not_allowed", `A ${job.status.replace("_", " ")} job can't move to ${to.replace("_", " ")}.`);
-    if (transitionNeedsNote(to) && job.notes.length === 0) throw new LocalRuleError("note_required", "Add a note about the work before you do that.");
-    const previous = [...this.queue].reverse().find((q) => q.op.kind === "status.set" && q.op.jobId === jobId);
-    return this.enqueue(
-      {
-        kind: "status.set",
-        opId: opts.opId ?? this.env.newId(),
-        jobId,
-        clientAt: new Date(this.env.now()).toISOString(),
-        to,
-        baseStatusVersion: job.statusVersion,
-        dependsOn: previous ? previous.op.opId : null,
-        ...(opts.location ? { location: opts.location } : {}),
-      },
-      job,
-    );
+  setStatus(jobId: string, to: JobStatus, opts: { location?: CheckInLocation | null; opId?: string } = {}): Promise<string> {
+    return this.serialize(async () => {
+      const job = this.job(jobId);
+      if (opts.location && to !== "on_site") throw new LocalRuleError("location_only_on_site", "A location can only be sent when checking in on site.");
+      if (!isWorkTransition(job.status, to)) throw new LocalRuleError("transition_not_allowed", `A ${job.status.replace("_", " ")} job can't move to ${to.replace("_", " ")}.`);
+      if (transitionNeedsNote(to) && job.notes.length === 0) throw new LocalRuleError("note_required", "Add a note about the work before you do that.");
+      const previous = [...this.queue].reverse().find((q) => q.op.kind === "status.set" && q.op.jobId === jobId);
+      return this.enqueue(
+        {
+          kind: "status.set",
+          opId: opts.opId ?? this.env.newId(),
+          jobId,
+          clientAt: new Date(this.env.now()).toISOString(),
+          to,
+          baseStatusVersion: job.statusVersion,
+          dependsOn: previous ? previous.op.opId : null,
+          ...(opts.location ? { location: opts.location } : {}),
+        },
+        job,
+      );
+    });
   }
 
   async dismissAttention(opId: string): Promise<void> {

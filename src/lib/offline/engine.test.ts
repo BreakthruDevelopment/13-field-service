@@ -455,3 +455,23 @@ describe("stale refreshes", () => {
     expect(queued.baseStatusVersion).toBe(2);
   });
 });
+
+describe("overlapping taps", () => {
+  it("two status actions that start before the first is stored chain: the second sees the first's version and depends on it", async () => {
+    const { engine, r } = await started();
+    const [a, b] = await Promise.all([engine.setStatus(J, "en_route"), engine.setStatus(J, "on_site")]);
+    expect(engine.getState().pending).toBe(2);
+    await engine.flush();
+    const [opA, opB] = sentOps(r) as Extract<WireOp, { kind: "status.set" }>[];
+    expect(opA).toMatchObject({ opId: a, to: "en_route", baseStatusVersion: 1, dependsOn: null });
+    expect(opB).toMatchObject({ opId: b, to: "on_site", baseStatusVersion: 2, dependsOn: a });
+  });
+
+  it("a refused intent doesn't block the ones behind it, and notes keep their order", async () => {
+    const { engine, r } = await started();
+    const results = await Promise.allSettled([engine.setStatus(J, "completed"), engine.addNote(J, "first"), engine.addNote(J, "second"), engine.setStatus(J, "en_route")]);
+    expect(results.map((x) => x.status)).toEqual(["rejected", "fulfilled", "fulfilled", "fulfilled"]);
+    await engine.flush();
+    expect(sentOps(r).map((o) => (o.kind === "note.add" ? o.body : o.to))).toEqual(["first", "second", "en_route"]);
+  });
+});
