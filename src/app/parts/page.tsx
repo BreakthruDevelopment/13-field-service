@@ -4,6 +4,7 @@ import { ZodError } from "zod";
 import { type Column, DataList, FilterBar, PageIntro, Panel, StatGrid, StatTile, StatusBadge, buttonSecondary } from "@/components/ui";
 import { requireRoleOrRedirect } from "@/lib/auth/session";
 import { PART_UNITS } from "@/lib/db/schema";
+import { HttpError } from "@/lib/errors";
 import { MAX_PARTS, type PartDto, listParts } from "@/lib/parts";
 import { AddPartForm, PartActions, type PartRow } from "./forms";
 
@@ -44,6 +45,7 @@ export default async function PartsPage({ searchParams }: PageProps<"/parts">) {
     });
   } catch (err) {
     if (err instanceof ZodError) loadError = err.issues[0]?.message ?? "Check the search and try again.";
+    else if (err instanceof HttpError && err.status === 429) loadError = "Too many requests, try again in a minute.";
     else throw err;
   }
 
@@ -54,18 +56,18 @@ export default async function PartsPage({ searchParams }: PageProps<"/parts">) {
       header: "SKU",
       primary: true,
       className: "font-mono",
-      cell: (part) => <span className="break-all font-mono">{part.sku}</span>,
+      cell: (part) => <span className="font-mono [overflow-wrap:anywhere]">{part.sku}</span>,
     },
     {
       key: "name",
       header: "Name",
-      cell: (part) => <span className="break-words">{part.name}</span>,
+      cell: (part) => <span className="[overflow-wrap:anywhere]">{part.name}</span>,
     },
     { key: "unit", header: "Unit", cell: (part) => part.unit },
     {
       key: "aliases",
       header: "Aliases",
-      cell: (part) => <span className="break-words">{part.aliases.length ? part.aliases.join(", ") : "—"}</span>,
+      cell: (part) => <span className="[overflow-wrap:anywhere]">{part.aliases.length ? part.aliases.join(", ") : "—"}</span>,
     },
     { key: "max", header: "Max / job", cell: (part) => part.maxPerJob },
     {
@@ -92,7 +94,7 @@ export default async function PartsPage({ searchParams }: PageProps<"/parts">) {
         description="The SKU is what the AI work order matches on, so it is set when you add a part and never changes. Search, edit or deactivate parts here."
       />
       <StatGrid>
-        <StatTile value={rows.length} label={q || includeInactive || offset ? "Parts on this page" : "Parts shown"} tone="accent" />
+        <StatTile value={rows.length} label="Parts on this page" tone="accent" />
         <StatTile value={MAX_PARTS} label="Catalog cap" />
       </StatGrid>
       <Panel title="Add a part">

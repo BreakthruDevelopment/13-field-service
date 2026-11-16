@@ -5,7 +5,7 @@ import { ZodError } from "zod";
 import { loadDemo, setUserRole } from "@/lib/admin";
 import { ForbiddenError, UnauthorizedError } from "@/lib/auth/rbac";
 import { requireRole } from "@/lib/auth/session";
-import { HttpError } from "@/lib/errors";
+import { HttpError, VersionConflictError } from "@/lib/errors";
 
 export type AdminActionState = {
   error?: string;
@@ -19,11 +19,29 @@ function read(form: FormData, key: string): string {
   return typeof value === "string" ? value : "";
 }
 
+const ROLE_NAMES: Record<string, string> = {
+  user: "waiting for access",
+  technician: "a Technician",
+  dispatcher: "a Dispatcher",
+  admin: "an Admin",
+};
+
 function fail(err: unknown): AdminActionState {
+  if (err instanceof VersionConflictError) {
+    const current = (err.current as { role?: string } | null)?.role ?? "";
+    const label = ROLE_NAMES[current];
+    return {
+      error: label
+        ? `This person is now ${label}. Your change wasn't applied; check the role and save again.`
+        : "This person's role changed. Your change wasn't applied; check the role and save again.",
+    };
+  }
   if (err instanceof ZodError) return { error: err.issues[0]?.message ?? "Check the form and try again." };
   if (err instanceof UnauthorizedError) return { error: "Sign in to continue." };
   if (err instanceof ForbiddenError) return { error: "Only an admin can do that." };
-  if (err instanceof HttpError && err.status < 500) return { error: err.message };
+  if (err instanceof HttpError && err.status < 500) {
+    return { error: err.status === 429 ? "Too many requests, try again in a minute." : err.message };
+  }
   throw err;
 }
 
@@ -42,12 +60,15 @@ export async function setRoleAction(_prev: AdminActionState, form: FormData): Pr
       clientOpId: clientOpId || undefined,
     });
     refreshAdmin();
-    const granted = result.user.role === "user" ? "Waiting for access" : result.user.role;
+    const granted = result.user.role === "user" ? "waiting for access" : result.user.role;
     const extra =
       result.unassignedJobs > 0
         ? ` ${result.unassignedJobs} open ${result.unassignedJobs === 1 ? "job was" : "jobs were"} moved back to the unassigned tray.`
         : "";
-    return { ok: true, message: `Role is now ${granted}.${extra}`, unassignedJobs: result.unassignedJobs };
+    const lead = result.replayed
+      ? `That click was already applied (a repeat, nothing changed again). Role is ${granted}.`
+      : `Role is now ${granted}.`;
+    return { ok: true, message: `${lead}${extra}`, unassignedJobs: result.unassignedJobs };
   } catch (err) {
     return fail(err);
   }

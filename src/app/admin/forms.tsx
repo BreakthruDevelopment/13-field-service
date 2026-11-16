@@ -75,7 +75,7 @@ export function RoleForm({
       <div className="flex min-w-0 flex-col gap-2 sm:flex-row sm:items-center">
         <label className="min-w-0 flex-1">
           <span className="sr-only">Role for {name}</span>
-          <select name="role" defaultValue={current} className={inputClass} disabled={pending}>
+          <select key={current} name="role" defaultValue={current} className={inputClass} disabled={pending}>
             {GRANTABLE_ROLES.map((value) => (
               <option key={value} value={value}>
                 {ROLE_LABELS[value]}

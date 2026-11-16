@@ -61,9 +61,17 @@ function usePartForm(
   }, {});
 }
 
-function UnitSelect({ units, defaultValue }: { units: readonly string[]; defaultValue?: string }) {
+function UnitSelect({
+  units,
+  value,
+  onChange,
+}: {
+  units: readonly string[];
+  value: string;
+  onChange: (value: string) => void;
+}) {
   return (
-    <select name="unit" defaultValue={defaultValue ?? "each"} className={inputClass}>
+    <select name="unit" value={value} onChange={(e) => onChange(e.target.value)} className={inputClass}>
       {units.map((unit) => (
         <option key={unit} value={unit}>
           {UNIT_LABELS[unit] ?? unit}
@@ -73,17 +81,21 @@ function UnitSelect({ units, defaultValue }: { units: readonly string[]; default
   );
 }
 
+const EMPTY_ADD = { sku: "", name: "", unit: "each", aliases: "", maxPerJob: "20" };
+
 export function AddPartForm({ units }: { units: readonly string[] }) {
   const router = useRouter();
-  const formRef = useRef<HTMLFormElement>(null);
+  // Controlled, so a failed submit keeps what was typed (React resets uncontrolled fields after every action).
+  const [vals, setVals] = useState(EMPTY_ADD);
+  const set = (key: keyof typeof EMPTY_ADD) => (value: string) => setVals((v) => ({ ...v, [key]: value }));
   const [state, action, pending] = usePartForm(createPartAction, ["sku", "name", "unit", "aliases", "maxPerJob"], () => {
-    formRef.current?.reset();
+    setVals(EMPTY_ADD);
     router.refresh();
   });
   return (
-    <form ref={formRef} action={action} className="min-w-0 space-y-3">
-      <div className="grid gap-3 sm:grid-cols-2">
-        <label className={labelClass}>
+    <form action={action} className="min-w-0 space-y-3">
+      <div className="grid min-w-0 gap-3 sm:grid-cols-2">
+        <label className={`${labelClass} min-w-0`}>
           <span>SKU</span>
           <input
             name="sku"
@@ -92,32 +104,56 @@ export function AddPartForm({ units }: { units: readonly string[] }) {
             maxLength={40}
             autoComplete="off"
             spellCheck={false}
+            value={vals.sku}
+            onChange={(e) => set("sku")(e.target.value)}
             className={`${inputClass} font-mono uppercase`}
             aria-describedby="sku-hint"
           />
         </label>
-        <label className={labelClass}>
+        <label className={`${labelClass} min-w-0`}>
           <span>Name</span>
-          <input name="name" required maxLength={120} className={inputClass} />
+          <input
+            name="name"
+            required
+            maxLength={120}
+            value={vals.name}
+            onChange={(e) => set("name")(e.target.value)}
+            className={inputClass}
+          />
         </label>
-        <label className={labelClass}>
+        <label className={`${labelClass} min-w-0`}>
           <span>Unit</span>
-          <UnitSelect units={units} />
+          <UnitSelect units={units} value={vals.unit} onChange={set("unit")} />
         </label>
-        <label className={labelClass}>
+        <label className={`${labelClass} min-w-0`}>
           <span>Max per job</span>
-          <input name="maxPerJob" type="number" min={1} max={9999} defaultValue={20} className={inputClass} />
+          <input
+            name="maxPerJob"
+            type="number"
+            min={1}
+            max={9999}
+            value={vals.maxPerJob}
+            onChange={(e) => set("maxPerJob")(e.target.value)}
+            className={inputClass}
+          />
         </label>
-        <label className={`${labelClass} sm:col-span-2`}>
+        <label className={`${labelClass} min-w-0 sm:col-span-2`}>
           <span>Aliases</span>
-          <input name="aliases" maxLength={700} className={inputClass} aria-describedby="aliases-hint" />
+          <input
+            name="aliases"
+            maxLength={700}
+            value={vals.aliases}
+            onChange={(e) => set("aliases")(e.target.value)}
+            className={inputClass}
+            aria-describedby="aliases-hint"
+          />
         </label>
       </div>
       <p id="sku-hint" className="text-sm text-muted">
         2 to 40 letters, digits or dashes. Set once; the AI work order matches on this SKU.
       </p>
       <p id="aliases-hint" className="text-sm text-muted">
-        Optional. Comma-separated, up to 10 names people might type instead of the SKU.
+        Optional. Comma-separated, up to 10 names people might type instead of the SKU, each up to 60 characters.
       </p>
       <FormError message={state.error} />
       <button type="submit" disabled={pending} className={`${buttonPrimary} w-full sm:w-auto`}>
@@ -127,17 +163,54 @@ export function AddPartForm({ units }: { units: readonly string[] }) {
   );
 }
 
+/** The editable fields. Keyed on the part's version, so after a conflict reload they show the latest values. */
+function EditFields({ part, units }: { part: PartRow; units: readonly string[] }) {
+  const [unit, setUnit] = useState(part.unit);
+  const [name, setName] = useState(part.name);
+  const [max, setMax] = useState(String(part.maxPerJob));
+  const [aliases, setAliases] = useState(part.aliases.join(", "));
+  return (
+    <div className="grid min-w-0 gap-3">
+      <label className={`${labelClass} min-w-0`}>
+        <span>Name</span>
+        <input name="name" required maxLength={120} value={name} onChange={(e) => setName(e.target.value)} className={inputClass} />
+      </label>
+      <label className={`${labelClass} min-w-0`}>
+        <span>Unit</span>
+        <UnitSelect units={units} value={unit} onChange={setUnit} />
+      </label>
+      <label className={`${labelClass} min-w-0`}>
+        <span>Max per job</span>
+        <input
+          name="maxPerJob"
+          type="number"
+          min={1}
+          max={9999}
+          value={max}
+          onChange={(e) => setMax(e.target.value)}
+          className={inputClass}
+          aria-describedby={`max-hint-${part.id}`}
+        />
+        <span id={`max-hint-${part.id}`} className="text-sm font-normal text-muted">
+          Leave empty to keep {part.maxPerJob}.
+        </span>
+      </label>
+      <label className={`${labelClass} min-w-0`}>
+        <span>Aliases</span>
+        <input name="aliases" maxLength={700} value={aliases} onChange={(e) => setAliases(e.target.value)} className={inputClass} />
+        <span className="text-sm font-normal text-muted">Comma-separated, up to 10, each up to 60 characters.</span>
+      </label>
+    </div>
+  );
+}
+
 function EditPartForm({ part, units, onDone }: { part: PartRow; units: readonly string[]; onDone?: () => void }) {
   const router = useRouter();
   const [state, action, pending] = useActionState<PartActionState, FormData>(async (prev, form) => {
     try {
       const result = await updatePartAction(prev, form);
-      if (result.ok) {
-        onDone?.();
-        router.refresh();
-      } else {
-        router.refresh();
-      }
+      if (result.ok) onDone?.();
+      router.refresh();
       return result;
     } catch {
       return { error: "Couldn't reach the server. Try again." };
@@ -147,24 +220,7 @@ function EditPartForm({ part, units, onDone }: { part: PartRow; units: readonly 
     <form action={action} className="min-w-0 space-y-3">
       <input type="hidden" name="id" value={part.id} />
       <input type="hidden" name="version" value={part.version} />
-      <div className="grid min-w-0 gap-3">
-        <label className={labelClass}>
-          <span>Name</span>
-          <input name="name" required maxLength={120} defaultValue={part.name} className={inputClass} />
-        </label>
-        <label className={labelClass}>
-          <span>Unit</span>
-          <UnitSelect units={units} defaultValue={part.unit} />
-        </label>
-        <label className={labelClass}>
-          <span>Max per job</span>
-          <input name="maxPerJob" type="number" min={1} max={9999} defaultValue={part.maxPerJob} className={inputClass} />
-        </label>
-        <label className={labelClass}>
-          <span>Aliases</span>
-          <input name="aliases" maxLength={700} defaultValue={part.aliases.join(", ")} className={inputClass} />
-        </label>
-      </div>
+      <EditFields key={part.version} part={part} units={units} />
       <FormError message={state.error} />
       <button type="submit" disabled={pending} className={`${buttonPrimary} w-full sm:w-auto`}>
         {pending ? "Saving…" : "Save part"}

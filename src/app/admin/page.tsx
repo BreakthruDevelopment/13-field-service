@@ -4,6 +4,7 @@ import { type Column, DataList, FilterBar, PageIntro, Panel, StatGrid, StatTile 
 import { type AdminStats, type DirectoryUser, getAdminStats, listUsers } from "@/lib/admin";
 import { type Role, ROLES } from "@/lib/auth/rbac";
 import { requireRoleOrRedirect } from "@/lib/auth/session";
+import { HttpError } from "@/lib/errors";
 import { SERVICE_JOB_STATUSES } from "@/lib/db/schema";
 import { DemoButton, RoleForm } from "./forms";
 
@@ -52,6 +53,7 @@ export default async function AdminPage({ searchParams }: PageProps<"/admin">) {
     users = listed.users;
   } catch (err) {
     if (err instanceof ZodError) loadError = err.issues[0]?.message ?? "Check the search and try again.";
+    else if (err instanceof HttpError && err.status === 429) loadError = "Too many requests, try again in a minute.";
     else throw err;
   }
 
@@ -86,12 +88,12 @@ export default async function AdminPage({ searchParams }: PageProps<"/admin">) {
   ];
 
   const userColumns: Column<DirectoryUser>[] = [
-    { key: "name", header: "Name", primary: true, cell: (u) => <span className="break-words">{u.name}</span> },
+    { key: "name", header: "Name", primary: true, cell: (u) => <span className="[overflow-wrap:anywhere]">{u.name}</span> },
     {
       key: "email",
       header: "Email",
       className: "break-all",
-      cell: (u) => <span className="break-all">{u.email}</span>,
+      cell: (u) => <span className="[overflow-wrap:anywhere]">{u.email}</span>,
     },
     {
       key: "role",
@@ -118,7 +120,7 @@ export default async function AdminPage({ searchParams }: PageProps<"/admin">) {
         u.role === "admin" ? (
           <span className="text-sm text-muted">Admin accounts stay admin.</span>
         ) : (
-          <RoleForm key={`${u.id}-${u.role}`} userId={u.id} name={u.name} role={u.role} />
+          <RoleForm key={u.id} userId={u.id} name={u.name} role={u.role} />
         ),
     },
   ];
@@ -130,6 +132,11 @@ export default async function AdminPage({ searchParams }: PageProps<"/admin">) {
         title="Counts and access"
         description="Counts only: no job, customer or location content. Grant technician or dispatcher here. New sign-ups wait until you give them a role."
       />
+      {!stats && loadError ? (
+        <p role="alert" className="mb-4 text-sm font-medium text-danger">
+          {loadError}
+        </p>
+      ) : null}
       <StatGrid>
         <StatTile value={jobTotal} label="Jobs" tone="accent" />
         <StatTile value={userTotal} label="Users" />
