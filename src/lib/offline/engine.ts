@@ -433,7 +433,7 @@ export class TechDataEngine {
       this.announce();
       finalAnswers += done.length;
       this.queue = await this.store.outbox();
-      this.attempts = 0;
+      if (done.length > 0) this.attempts = 0; // only progress resets the backoff: all-deferred answers keep growing it
       this.rebuild({ attention: await this.store.attention(), lastSyncedAt: this.env.now(), nextRetryAt: null, status: "idle" });
       if (deferred > 0 && done.length === 0) {
         this.backoff(); // the server made no progress (time budget or a busy job): wait, don't hammer

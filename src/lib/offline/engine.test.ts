@@ -231,6 +231,20 @@ describe("flushing", () => {
     expect(engine.getState()).toMatchObject({ pending: 1, status: "backoff" });
   });
 
+  it("repeated all-deferred answers keep growing the delay instead of restarting it", async () => {
+    const { engine, r } = await started((url, init) =>
+      url === "/api/sync" ? reply(200, { results: (JSON.parse(String(init?.body)).ops as WireOp[]).map((o) => ({ opId: o.opId, outcome: "deferred" })), serverTime: "t" }) : reply(200, {}),
+    );
+    await engine.addNote(J, "x");
+    const waits: number[] = [];
+    for (let i = 0; i < 4; i++) {
+      await engine.flush({ force: true });
+      waits.push(engine.getState().nextRetryAt! - r.clock.t);
+    }
+    expect(waits[1]).toBeGreaterThan(waits[0]);
+    expect(waits[3]).toBeGreaterThan(waits[1]);
+  });
+
   it("splits a batch the server answers 400 into single ops, and keeps an op it will never accept where the technician can see it", async () => {
     const { engine } = await started((url, init) => {
       if (url !== "/api/sync") return reply(200, {});
