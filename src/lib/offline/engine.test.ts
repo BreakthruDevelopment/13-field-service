@@ -416,3 +416,42 @@ describe("acknowledged work survives a failed refresh", () => {
     expect(engine.getState().attention).toHaveLength(1);
   });
 });
+
+describe("stale refreshes", () => {
+  const brief = (status: string, statusVersion: number, version: number) => ({ id: J, status, statusVersion, version });
+
+  it("a GET that read the state before a sync and finishes after it doesn't put the old state back", async () => {
+    let release: () => void = () => undefined;
+    const gate = new Promise<void>((res) => (release = res));
+    let gets = 0;
+    const pre = { userId: USER, serverTime: "t", jobs: [job()], truncated: false };
+    const post = { userId: USER, serverTime: "t2", jobs: [job({ status: "on_site", statusVersion: 2, version: 4 })], truncated: false };
+    const { engine } = await started(async (url, init) => {
+      if (url === "/api/my/jobs") {
+        gets++;
+        if (gets === 1) {
+          await gate; // the slow request that began before the sync
+          return reply(200, pre, { etag: 'W/"pre"' });
+        }
+        return reply(200, post, { etag: 'W/"post"' });
+      }
+      const ops = JSON.parse(String(init?.body)).ops as WireOp[];
+      return reply(200, { results: ops.map((o) => ({ opId: o.opId, outcome: "applied", job: brief("on_site", 2, 4) })), serverTime: "t" });
+    });
+    const slow = engine.refresh(); // startup refresh, GET still in flight
+    await vi.waitFor(() => expect(gets).toBe(1));
+    await engine.setStatus(J, "on_site");
+    await engine.flush(); // applies, folds, and refreshes (GET 2: the post-sync state)
+    expect(engine.getState().jobs[0]).toMatchObject({ status: "on_site", statusVersion: 2 });
+    release();
+    await slow;
+    expect(engine.getState().pending).toBe(0);
+    expect(engine.getState().jobs[0]).toMatchObject({ status: "on_site", statusVersion: 2, version: 4 });
+    const next = await engine.setStatus(J, "on_hold").catch((e) => e); // needs a note: the point is the base it would use
+    expect(next).toBeInstanceOf(LocalRuleError);
+    await engine.addNote(J, "n");
+    await engine.setStatus(J, "on_hold");
+    const queued = (engine as unknown as { queue: { op: WireOp }[] }).queue.at(-1)!.op as { baseStatusVersion: number };
+    expect(queued.baseStatusVersion).toBe(2);
+  });
+});

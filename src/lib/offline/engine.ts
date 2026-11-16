@@ -96,6 +96,10 @@ export class TechDataEngine {
   private attempts = 0;
   private flushing: Promise<void> | null = null;
   private halted = false;
+  /** Which refresh may still write: only the newest one started. */
+  private refreshSeq = 0;
+  /** Bumped whenever acknowledged ops are folded into the snapshot; a GET that began before that read older state. */
+  private snapshotGen = 0;
 
   constructor(
     private readonly store: OfflineStore,
@@ -351,7 +355,10 @@ export class TechDataEngine {
       // `etag: null` forces the next refresh to be a full read: our fold is an approximation of what the server now holds.
       const folded = this.snapshot ? { ...this.snapshot, etag: null, jobs: applyAcknowledged(this.snapshot.jobs, answered, new Date(this.env.now()).toISOString()) } : undefined;
       await this.store.settle(done, attention, folded);
-      if (folded) this.snapshot = folded;
+      if (folded) {
+        this.snapshot = folded;
+        this.snapshotGen++;
+      }
       finalAnswers += done.length;
       this.queue = await this.store.outbox();
       this.attempts = 0;
@@ -372,9 +379,16 @@ export class TechDataEngine {
     if (this.queue.length > 0 && this.state.status === "idle") this.scheduleFlush(FLUSH_DEBOUNCE_MS);
   }
 
-  /** Fetch `/api/my/jobs` (conditional on the saved ETag) and keep it. Offline or failing: keep what's saved. */
-  async refresh(): Promise<void> {
+  /**
+   * Fetch `/api/my/jobs` (conditional on the saved ETag) and keep it. Offline or failing: keep what's saved.
+   * A response is applied only if it is still the newest request and no acknowledged ops were folded in since it began:
+   * a GET that read the state before a sync and arrives after it would otherwise put the old state back (and with it an
+   * old `statusVersion` for the next op). A response dropped for that reason is simply asked for again, once.
+   */
+  async refresh(retry = true): Promise<void> {
     if (this.halted) return;
+    const seq = ++this.refreshSeq;
+    const gen = this.snapshotGen;
     const headers: Record<string, string> = { accept: "application/json" };
     if (this.snapshot?.etag) headers["if-none-match"] = this.snapshot.etag;
     let res: Response;
@@ -386,19 +400,24 @@ export class TechDataEngine {
     if (this.halted) return;
     if (res.status === 401) return void this.set({ status: "signed_out" });
     if (res.status === 403) return void this.set({ status: "forbidden" });
+    let body: Snapshot | null = null;
+    if (res.status !== 304 && res.ok) {
+      try {
+        body = (await res.json()) as Snapshot;
+      } catch {
+        return;
+      }
+    }
+    if (this.halted) return;
+    if (seq !== this.refreshSeq) return; // a newer refresh is in flight and will deliver
+    if (gen !== this.snapshotGen) return retry ? this.refresh(false) : undefined; // a sync landed meanwhile
     if (res.status === 304 && this.snapshot) {
       this.snapshot = { ...this.snapshot, savedAt: this.env.now() };
       await this.store.putSnapshot(this.snapshot);
       this.rebuild();
       return;
     }
-    if (!res.ok) return;
-    let body: Snapshot;
-    try {
-      body = (await res.json()) as Snapshot;
-    } catch {
-      return;
-    }
+    if (!body) return;
     if (typeof body?.userId !== "string" || !Array.isArray(body.jobs)) return;
     if (body.userId !== this.userId) {
       await this.ownerChanged();
