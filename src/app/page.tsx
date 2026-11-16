@@ -59,7 +59,7 @@ export default async function Home() {
       <div className="grid min-w-0 gap-x-4 sm:grid-cols-2">
         {points.map((p) => (
           <Panel key={p.title} title={p.title}>
-            <p className="min-w-0 break-words text-muted">{p.body}</p>
+            <p className="min-w-0 wrap-anywhere text-muted">{p.body}</p>
           </Panel>
         ))}
       </div>
