@@ -65,6 +65,17 @@ describe("zoned local datetime", () => {
     expect(resolveZonedLocal("2026-02-30T09:00", "UTC")).toEqual({ ok: false, reason: "invalid" });
   });
 
+  it("calls a mistyped year invalid, not a daylight-saving jump", () => {
+    // "0226" for 2026. The message the dispatcher sees comes from the reason, so this must not be `nonexistent`.
+    expect(resolveZonedLocal("0226-11-16T09:00", "America/Chicago")).toEqual({ ok: false, reason: "invalid" });
+    expect(resolveZonedLocal("0026-11-16T09:00", "UTC")).toEqual({ ok: false, reason: "invalid" });
+    expect(resolveZonedLocal("1000-11-16T09:00", "UTC").ok).toBe(true);
+  });
+
+  it("zero-pads the year on the way back, so early years round-trip", () => {
+    expect(isoToZonedLocal("0226-11-16T09:00:00.000Z", "UTC")).toBe("0226-11-16T09:00");
+  });
+
   // America/Chicago 2026: forward 02:00 -> 03:00 on Mar 8, back 02:00 -> 01:00 on Nov 1.
   it("refuses a clock time the spring-forward skips instead of moving it an hour", () => {
     expect(resolveZonedLocal("2026-03-08T02:30", "America/Chicago")).toEqual({ ok: false, reason: "nonexistent" });

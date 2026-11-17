@@ -158,6 +158,22 @@ describe.skipIf(!testDatabaseUrl)("dispatcher server actions (Postgres)", () => 
       expect((await jobs.getJob(d1, job.id)).status).toBe("unassigned");
     });
 
+    it("answers a replay after the assignment was undone with ok and the job as it stands now", async () => {
+      // Deliberate: the op id says "this request happened", and it did. Re-applying it would resurrect an assignment
+      // the dispatcher took back, which is worse than a retry being told its request got through.
+      const job = await unassigned("Undone");
+      const form = assignForm(job, { clientOpId: crypto.randomUUID() });
+      expect(await assignJobAction({}, form)).toEqual({ ok: true });
+      const assigned = await jobs.getJob(d1, job.id);
+      await jobs.updateJob(d1, job.id, { op: "unassign", version: assigned.version });
+
+      expect(await assignJobAction({}, form)).toEqual({ ok: true });
+      const after = await jobs.getJob(d1, job.id);
+      expect(after.status).toBe("unassigned");
+      expect(after.assignee).toBeNull();
+      expect(await assignedEvents(job.id)).toBe(1);
+    });
+
     it("rejects an op id already used for another job", async () => {
       const first = await unassigned("Op id reuse A");
       const second = await unassigned("Op id reuse B");
@@ -166,6 +182,18 @@ describe.skipIf(!testDatabaseUrl)("dispatcher server actions (Postgres)", () => 
       const state = await assignJobAction({}, assignForm(second, { clientOpId: opId }));
       expect(state.error).toMatch(/operation id/);
       expect((await jobs.getJob(d1, second.id)).status).toBe("unassigned");
+    });
+
+    it("rejects an op id this actor already used for an event of another kind", async () => {
+      // The unique index is (actor_id, op_id) across every kind, so a reused id can't become a second event; the
+      // lookup answers it as a different request instead of running into the index.
+      const job = await unassigned("Op id across kinds");
+      const opId = crypto.randomUUID();
+      await sql`insert into job_event (job_id, actor_id, kind, op_id) values (${job.id}, ${d1.id}, 'rescheduled', ${opId})`;
+      const state = await assignJobAction({}, assignForm(job, { clientOpId: opId }));
+      expect(state.error).toMatch(/operation id/);
+      expect((await jobs.getJob(d1, job.id)).status).toBe("unassigned");
+      expect(await assignedEvents(job.id)).toBe(0);
     });
   });
 });

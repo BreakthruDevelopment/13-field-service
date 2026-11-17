@@ -540,16 +540,25 @@ export async function updateJob(actor: Actor, id: string, input: unknown): Promi
     const job = await lockJob(tx, actor, jobId);
     if (patch.op === "reopen" && job.assigneeId !== techToCheck) throw new ConflictError("The job changed while reopening. Try again.");
     // A replay of an assignment that already landed (the response was lost, the user pressed Assign again) answers with
-    // the job as that assignment left it. Checked under the row lock and BEFORE the version guard: the client's version
-    // is one behind precisely because its own write succeeded, and a conflict there would be a lie it can never escape.
+    // the job AS IT IS NOW. Checked under the row lock and BEFORE the version guard: the client's version is one behind
+    // precisely because its own write succeeded, and a conflict there would be a lie it can never escape.
+    //
+    // The answer is the current job, not the job as the assignment left it, and the replay re-applies nothing. So if
+    // the assignment has since been undone (unassigned, cancelled, handed to someone else), the replay still says ok
+    // and the caller sees the job standing as it stands. That is the honest answer to what the retry is really asking
+    // — "did my request get through?" — and re-applying would quietly resurrect an assignment a dispatcher deliberately
+    // took back. The board refreshes on ok, so the dispatcher looks at the current state either way.
     if (patch.op === "assign" && patch.opId) {
       const [done] = await tx
-        .select({ jobId: jobEvent.jobId })
+        .select({ jobId: jobEvent.jobId, kind: jobEvent.kind })
         .from(jobEvent)
         .where(and(eq(jobEvent.actorId, actor.id), eq(jobEvent.opId, patch.opId)));
       if (done) {
-        // The same id on another job is a different request, not a retry.
-        if (done.jobId !== jobId) throw new ConflictError("That operation id was already used for a different assignment.");
+        // Only this actor's own `assigned` event on this job is a retry of this request. The op id is unique per
+        // (actor_id, op_id) across every kind, so anything else is the same id used for something else.
+        if (done.jobId !== jobId || done.kind !== "assigned") {
+          throw new ConflictError("That operation id was already used for a different assignment.");
+        }
         return loadJobDetail(tx, actor, jobId);
       }
     }
@@ -569,6 +578,13 @@ export async function updateJob(actor: Actor, id: string, input: unknown): Promi
         const to: JobStatus = changed ? "scheduled" : job.status;
         await set({ assigneeId: patch.assigneeId, status: to, scheduledStart: start, scheduledEnd: end, statusVersion: job.statusVersion + (changed ? 1 : 0) });
         // The op id lands on the event row, where `job_event_actor_op_uidx` makes a second attempt impossible.
+        //
+        // This insert has no `onConflictDoNothing`, so it depends on two requests with one op id never racing past the
+        // lookup above. They can't: `writeTx` opens every mutation with `consumeRate`, which takes
+        // `pg_advisory_xact_lock("rate:api_write:<userId>")` for the whole transaction, and an op id is scoped to
+        // (actor_id, op_id) — so any two requests that could share one are the same actor and are already serialised
+        // before they reach `lockJob`. Move an assign write off `writeTx` and this becomes a duplicate-key 500: give
+        // the insert an `onConflictDoNothing` and re-read, the way `appendNote` does, before you do that.
         await insertEvent(tx, { jobId, actorId: actor.id, kind: "assigned", from: job.status, to, opId: patch.opId });
         break;
       }

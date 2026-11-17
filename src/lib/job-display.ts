@@ -99,20 +99,15 @@ function tzOffsetMs(instant: Date, tz: string): number {
   return asUtc - instant.getTime();
 }
 
-/** `Date.UTC` maps years 0-99 into the 1900s; keep the year the caller actually typed. */
-function utcWallClock(year: number, month: number, day: number, hour: number, minute: number): number {
-  const ms = Date.UTC(year, month - 1, day, hour, minute, 0);
-  if (year >= 0 && year < 100) {
-    const d = new Date(ms);
-    d.setUTCFullYear(year);
-    return d.getTime();
-  }
-  return ms;
-}
+/**
+ * A year a dispatcher could mean. Below this a `datetime-local` value is a mistyped year ("0226" for 2026), which
+ * gets the plain "enter a valid date and time" rather than an explanation about daylight saving.
+ */
+const MIN_YEAR = 1000;
 
 /**
  * The outcome of reading a `datetime-local` value:
- * - `invalid` — not a `YYYY-MM-DDTHH:mm` wall clock on a real day, or an unusable time zone.
+ * - `invalid` — not a `YYYY-MM-DDTHH:mm` wall clock on a real day, a year before 1000, or an unusable time zone.
  * - `nonexistent` — a real-looking clock time that the zone skips when the clocks spring forward
  *   (02:30 on 2026-03-08 in America/Chicago). We refuse it rather than silently pick 01:30 or 03:30:
  *   on a dispatch board a quietly shifted window sends a technician to a customer at the wrong hour.
@@ -131,7 +126,8 @@ export function resolveZonedLocal(local: string, tz: string): ZonedLocalResult {
   const hour = Number(m[4]);
   const minute = Number(m[5]);
   if (!isCalendarDate(`${m[1]}-${m[2]}-${m[3]}`) || hour > 23 || minute > 59) return { ok: false, reason: "invalid" };
-  const wall = utcWallClock(year, month, day, hour, minute);
+  if (year < MIN_YEAR) return { ok: false, reason: "invalid" };
+  const wall = Date.UTC(year, month - 1, day, hour, minute, 0);
   const offset1 = tzOffsetMs(new Date(wall), tz);
   const offset2 = tzOffsetMs(new Date(wall - offset1), tz);
   const result = new Date(wall - offset2);
@@ -169,7 +165,9 @@ export function isoToZonedLocal(iso: string, tz: string): string | null {
     hourCycle: "h23",
   }).formatToParts(instant);
   const get = (type: Intl.DateTimeFormatPartTypes) => Number(parts.find((p) => p.type === type)?.value);
-  return `${get("year")}-${pad(get("month"))}-${pad(get("day"))}T${pad(get("hour"))}:${pad(get("minute"))}`;
+  // The year is zero-padded like the rest: `datetime-local` wants four digits, and `resolveZonedLocal` compares this
+  // string with what it was given, so an unpadded year would read as a clock time the zone skips.
+  return `${String(get("year")).padStart(4, "0")}-${pad(get("month"))}-${pad(get("day"))}T${pad(get("hour"))}:${pad(get("minute"))}`;
 }
 
 function formatTime(iso: string, tz: string): string {

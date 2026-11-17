@@ -5,6 +5,7 @@ import { unstable_rethrow, useRouter } from "next/navigation";
 import { buttonPrimary, buttonSecondary, inputClass, labelClass } from "@/components/ui/styles";
 import { type KeyedOp, opFor } from "@/lib/client-op";
 import { type AssignState, assignJobAction } from "./actions";
+import { useBoardNotice } from "./board-notice";
 
 function FormError({ message }: { message?: string }) {
   if (!message) return null;
@@ -31,6 +32,7 @@ export function AssignForm({
   tz: string;
 }) {
   const router = useRouter();
+  const notify = useBoardNotice();
   const [open, setOpen] = useState(false);
   // One op id per assignment the dispatcher meant to make. It survives a lost response (the catch below leaves it
   // alone), so the retry replays it and the server answers with the assignment that already landed.
@@ -48,10 +50,20 @@ export function AssignForm({
       const result = await assignJobAction(prev, form);
       // The server answered (ok, conflict or validation): this intent is finished with its id.
       op.current = null;
-      if (result.ok) setOpen(false);
+      if (result.ok) {
+        setOpen(false);
+        // This assignment went through, so an earlier conflict warning about this board is stale.
+        notify(null);
+      }
       // A conflict means the version in this form is stale, so the board has to catch up before the next try —
-      // otherwise every retry fails the same way until the 60-second poll comes round.
+      // otherwise every retry fails the same way until the 60-second poll comes round. The refresh can also delete
+      // this card (a job someone else assigned leaves the tray), so the message goes to the board, not inside the
+      // form: an alert that unmounts with the card is an assignment failure that looks like success.
       if (result.ok || result.conflict) router.refresh();
+      if (result.conflict && result.error) {
+        notify(result.error);
+        return { ...result, error: undefined };
+      }
       return result;
     } catch (err) {
       unstable_rethrow(err);

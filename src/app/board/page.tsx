@@ -8,7 +8,7 @@ import { BadRequestError, HttpError } from "@/lib/errors";
 import { isCalendarDate, isTimeZone, shiftCalendarDate, todayInTimeZone } from "@/lib/job-display";
 import type { JobSummary } from "@/lib/service-jobs";
 import { PreferLocalTz } from "@/components/prefer-local-tz";
-import { BoardPoller } from "./board-poller";
+import { BoardShell } from "./board-poller";
 import { JobCard } from "./job-card";
 
 export const metadata: Metadata = { title: "Schedule board" };
@@ -73,7 +73,7 @@ export default async function BoardPage({ searchParams }: PageProps<"/board">) {
   const today = todayInTimeZone(shownTz);
 
   return (
-    <BoardPoller>
+    <BoardShell>
       <PreferLocalTz path="/board" withDate />
       <PageIntro
         section="Board"
@@ -189,6 +189,6 @@ export default async function BoardPage({ searchParams }: PageProps<"/board">) {
           )}
         </>
       )}
-    </BoardPoller>
+    </BoardShell>
   );
 }

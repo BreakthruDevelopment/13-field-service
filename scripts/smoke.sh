@@ -46,7 +46,13 @@ echo "$sw_headers" | grep -iq '^cache-control:.*no-store' || fail "/sw.js must b
 grep -q '/api/' "$TMP/sw.js" && grep -q 'fsd-' "$TMP/sw.js" || fail "/sw.js does not look like the service worker"
 manifest=$(curl -fsS "$BASE_URL/manifest.webmanifest") || fail "manifest unreachable"
 [ "$(echo "$manifest" | jq -r '.start_url + " " + .scope + " " + .display')" = "/tech /tech standalone" ] || fail "manifest should open /tech standalone: $manifest"
-curl -fsS -D - -o /dev/null "$BASE_URL/" | tr -d '\r' | grep -iq '^permissions-policy:.*geolocation=(self)' || fail "Permissions-Policy should allow geolocation for this origin only"
+# Captured first, like sw_headers above: `grep -q` exits at the first match, and whatever is still writing into the
+# pipe then dies of SIGPIPE, which `set -o pipefail` turns into a failed check that actually passed. Never pipe a
+# command straight into `grep -q` here. The `echo "$page" | grep -q` checks below are safe only because a page fits
+# the 64 KB pipe buffer, so the write finishes whatever grep does (measured: 0 failures in 300 at 19.5 KB; 50 in 50
+# with a 200 KB string matching on line 1).
+page_headers=$(curl -fsS -D - -o /dev/null "$BASE_URL/" | tr -d '\r') || fail "landing headers unreachable"
+echo "$page_headers" | grep -iq '^permissions-policy:.*geolocation=(self)' || fail "Permissions-Policy should allow geolocation for this origin only"
 code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE_URL/tech")
 [ "$code" = "307" ] || fail "signed-out /tech should redirect (307), got $code"
 clear_headers=$(curl -s -D - -o /dev/null -X POST -H "origin: $BASE_URL" "$BASE_URL/api/session/clear" | tr -d '\r')
