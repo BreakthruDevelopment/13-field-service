@@ -39,11 +39,15 @@ export async function updateJobAction(_prev: ActionState, form: FormData): Promi
       const start = read(form, "scheduledStart").trim();
       const end = read(form, "scheduledEnd").trim();
       if ((start === "") !== (end === "")) return { error: "Give both a start and an end, or leave both blank to keep the current window." };
+      const opId = read(form, "clientOpId");
       await updateJob(user, id, {
         op: "assign",
         version,
         assigneeId: read(form, "assigneeId"),
         ...(start && end ? { scheduledStart: start, scheduledEnd: end } : {}),
+        // A retry after a lost response replays this id and gets the first assignment back, instead of a version
+        // conflict for a write that actually landed. Enforced by `job_event_actor_op_uidx` on (actor_id, op_id).
+        opId: opId || undefined,
       });
     } else if (op === "unassign") {
       await updateJob(user, id, { op: "unassign", version });

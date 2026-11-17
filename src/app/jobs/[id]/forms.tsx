@@ -118,7 +118,14 @@ export function AssignForm({
   techError: string | null;
 }) {
   const [assigneeId, setAssigneeId] = useState("");
-  const [state, action, pending] = useSavedForm(updateJobAction, { prepare: prepareWindow });
+  // One op id per assignment the dispatcher meant to make (the same pattern as the board's AssignForm). It survives a
+  // lost response, so the retry replays it and `updateJob` answers with the assignment that already landed instead of
+  // a false version conflict for the dispatcher's own successful write. `version` is deliberately not an op field: a
+  // retry carries the stale version precisely because its own write got through.
+  const [state, action, pending] = useSavedForm(updateJobAction, {
+    prepare: prepareWindow,
+    opFields: ["id", "assigneeId", "scheduledStart", "scheduledEnd"],
+  });
   if (techError) {
     return (
       <p role="alert" className="text-sm font-medium text-danger">
