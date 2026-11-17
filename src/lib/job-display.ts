@@ -25,21 +25,31 @@ export type JobPriority = keyof typeof JOB_PRIORITY_LABELS;
 export const JOB_PRIORITY_VALUES = Object.keys(JOB_PRIORITY_LABELS) as JobPriority[];
 
 export function jobStatusTone(status: JobStatus): JobBadgeTone {
-  // StatusBadge collapses ten status names onto four colours: live, healthy and
-  // passed all render bg-live-soft, so the tone name is not the colour. Spread the
-  // seven job statuses across all four buckets rather than piling three into one.
+  // Colour answers "does this need me?", not "what phase is this in".
+  //
+  // StatusBadge collapses ten status names onto four colours -- live, healthy and
+  // passed all render bg-live-soft -- so the tone name is not the colour, and
+  // returning passed for one status and live for another looks like a distinction
+  // while rendering as one. Seven statuses over four colours forces three
+  // collisions; the only question is which three are safe.
+  //
+  // Red is the two states waiting on the dispatcher. Amber is every job in
+  // progress and nobody's problem right now -- three of them, which is fine:
+  // they agree on the answer to the question. Green means exactly one thing,
+  // done. Cancelled is neutral because it is terminal: it will never progress
+  // and needs nothing, so it must not sit in the colour that means act now.
   switch (status) {
-    case "on_site":
-      return "live";
-    case "completed":
-      return "passed";
-    case "scheduled":
-    case "en_route":
-      return "building";
+    case "unassigned":
     case "on_hold":
       return "blocked";
+    case "scheduled":
+    case "en_route":
+    case "on_site":
+      return "building";
+    case "completed":
+      return "passed";
     default:
-      // unassigned and cancelled: neither is a problem to act on.
+      // cancelled
       return "not-started";
   }
 }

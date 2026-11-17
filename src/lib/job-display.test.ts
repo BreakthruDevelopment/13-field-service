@@ -112,11 +112,11 @@ describe("zoned local datetime", () => {
 
 describe("labels", () => {
   it("maps status and priority to badge tones that keep a text label", () => {
-    expect(jobStatusTone("unassigned")).toBe("not-started");
+    expect(jobStatusTone("unassigned")).toBe("blocked");
+    expect(jobStatusTone("on_hold")).toBe("blocked");
     expect(jobStatusTone("scheduled")).toBe("building");
     expect(jobStatusTone("en_route")).toBe("building");
-    expect(jobStatusTone("on_hold")).toBe("blocked");
-    expect(jobStatusTone("on_site")).toBe("live");
+    expect(jobStatusTone("on_site")).toBe("building");
     expect(jobStatusTone("completed")).toBe("passed");
     expect(jobStatusTone("cancelled")).toBe("not-started");
     expect(jobPriorityTone("emergency")).toBe("blocked");
