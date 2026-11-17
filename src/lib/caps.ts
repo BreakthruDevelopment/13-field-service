@@ -3,8 +3,10 @@
  * because the demo loader (also run by `scripts/seed-demo.mts`) uses it.
  *
  * Rule: anything that can raise a capped count (create, reopen, the demo loader) takes the cap's lock with
- * `pg_advisory_xact_lock`, then counts, then writes, all in one transaction. Lock order: user row, job row, cap lock
- * (a cap lock is taken last among row locks, so no cycle can form). The AI work-order draft (13.3) follows the same
+ * `pg_advisory_xact_lock`, then counts, then writes, all in one transaction. Lock order: user row, the rows the write
+ * will reference (customer, then site: `createJob` takes them `for key share`, the order the demo reload's cascade
+ * takes them in), job row, cap lock (a cap lock is taken last, so no cycle can form with a transaction that holds a
+ * row this one needs — that cycle was issue #13). The AI work-order draft (13.3) follows the same
  * order and adds its own locks after the job row: the per-user `rate:ai:<user>` lock (inside `consumeRate`), then
  * `aiJobLock(job)`, then the `daily_usage` row of kind `ai` (inside `reserveDaily`). Refunds take the same locks in the
  * same order and never lock a job.

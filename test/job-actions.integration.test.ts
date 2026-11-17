@@ -48,6 +48,7 @@ describe.skipIf(!testDatabaseUrl)("dispatcher server actions (Postgres)", () => 
   let customers: typeof import("@/lib/customers");
   let createJobAction: typeof import("@/app/jobs/actions").createJobAction;
   let assignJobAction: typeof import("@/app/board/actions").assignJobAction;
+  let updateJobAction: typeof import("@/app/jobs/[id]/actions").updateJobAction;
   let customerId: string, siteId: string;
 
   const TZ = "America/Chicago";
@@ -67,6 +68,7 @@ describe.skipIf(!testDatabaseUrl)("dispatcher server actions (Postgres)", () => 
     customers = await import("@/lib/customers");
     ({ createJobAction } = await import("@/app/jobs/actions"));
     ({ assignJobAction } = await import("@/app/board/actions"));
+    ({ updateJobAction } = await import("@/app/jobs/[id]/actions"));
     customerId = (await customers.createCustomer(d1, { name: "Co", phone: "1" })).customer.id;
     siteId = (await customers.createSite(d1, customerId, { label: "S", address: "A" })).site.id;
   });
@@ -194,6 +196,75 @@ describe.skipIf(!testDatabaseUrl)("dispatcher server actions (Postgres)", () => 
       expect(state.error).toMatch(/operation id/);
       expect((await jobs.getJob(d1, job.id)).status).toBe("unassigned");
       expect(await assignedEvents(job.id)).toBe(0);
+    });
+  });
+
+  /**
+   * The job detail page's own assign form. Same defect, same fix as the board (above): without an op id a retry after
+   * a lost response is told "someone else changed this", about its own write. `AssignForm` sends the window already in
+   * ISO (`prepareWindow` runs before the op id is chosen), so these forms do too.
+   */
+  describe("updateJobAction (assign on the job detail page)", () => {
+    const ISO_START = "2026-11-17T13:00:00.000Z";
+    const ISO_END = "2026-11-17T14:00:00.000Z";
+
+    const detailAssignForm = (job: { id: string; version: number }, extra: Record<string, string> = {}) =>
+      formOf({ id: job.id, customerId, version: String(job.version), op: "assign", assigneeId: t1.id, scheduledStart: ISO_START, scheduledEnd: ISO_END, ...extra });
+
+    const unassigned = async (title: string) => (await jobs.createJob(d1, { customerId, siteId, title })).job;
+
+    it("assigns an unassigned job", async () => {
+      const job = await unassigned("Detail assign");
+      expect(await updateJobAction({}, detailAssignForm(job))).toEqual({ ok: true });
+      expect(await jobs.getJob(d1, job.id)).toMatchObject({ status: "scheduled", assignee: { id: t1.id }, version: job.version + 1 });
+    });
+
+    it("answers a replayed op id with the assignment that already landed, not a conflict", async () => {
+      const job = await unassigned("Detail lost response");
+      const form = detailAssignForm(job, { clientOpId: crypto.randomUUID() });
+      expect(await updateJobAction({}, form)).toEqual({ ok: true });
+      const applied = await jobs.getJob(d1, job.id);
+
+      // The same form again, exactly as the browser resends it: its version is stale only because its own write landed.
+      expect(await updateJobAction({}, form)).toEqual({ ok: true });
+      expect(await updateJobAction({}, form)).toEqual({ ok: true });
+
+      const after = await jobs.getJob(d1, job.id);
+      expect(after.version).toBe(applied.version);
+      expect(after.updatedAt).toBe(applied.updatedAt);
+      expect(after.assignee?.id).toBe(t1.id);
+      expect(await assignedEvents(job.id)).toBe(1);
+    });
+
+    it("without an op id, the retry is the false conflict this fix removes", async () => {
+      const job = await unassigned("Detail no op id");
+      const form = detailAssignForm(job);
+      expect(await updateJobAction({}, form)).toEqual({ ok: true });
+      const state = await updateJobAction({}, form);
+      expect(state).toMatchObject({ conflict: true });
+      expect(state.error).toMatch(/Someone else changed this/);
+      expect(await assignedEvents(job.id)).toBe(1);
+    });
+
+    it("a genuine conflict is still a conflict: someone else moved the job first", async () => {
+      const job = await unassigned("Detail two dispatchers");
+      await jobs.updateJob(d1, job.id, { op: "assign", version: job.version, assigneeId: t2.id, scheduledStart: ISO_START, scheduledEnd: ISO_END });
+      const state = await updateJobAction({}, detailAssignForm(job, { clientOpId: crypto.randomUUID() }));
+      expect(state).toMatchObject({ conflict: true });
+      expect(state.error).toMatch(/Someone else changed this/);
+      expect((await jobs.getJob(d1, job.id)).assignee?.id).toBe(t2.id);
+      expect(await assignedEvents(job.id)).toBe(1);
+    });
+
+    it("rejects an op id already used for another job", async () => {
+      const first = await unassigned("Detail op reuse A");
+      const second = await unassigned("Detail op reuse B");
+      const opId = crypto.randomUUID();
+      expect(await updateJobAction({}, detailAssignForm(first, { clientOpId: opId }))).toEqual({ ok: true });
+      const state = await updateJobAction({}, detailAssignForm(second, { clientOpId: opId }));
+      expect(state.error).toMatch(/operation id/);
+      expect((await jobs.getJob(d1, second.id)).status).toBe("unassigned");
+      expect(await assignedEvents(second.id)).toBe(0);
     });
   });
 });
