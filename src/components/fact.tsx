@@ -1,6 +1,6 @@
 import type { ReactNode } from "react";
 
-export const wrapText = "min-w-0 break-words [overflow-wrap:anywhere]";
+export const wrapText = "min-w-0 wrap-anywhere";
 
 export function Fact({ label, children, wide = false }: { label: string; children: ReactNode; wide?: boolean }) {
   return (

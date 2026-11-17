@@ -12,8 +12,6 @@ import { requireRoleOrRedirect } from "@/lib/auth/session";
 import { listTechnicians, type TechnicianDto } from "@/lib/board";
 import { JOB_PRIORITIES } from "@/lib/db/schema";
 import {
-  JOB_STATUS_LABELS,
-  PRIORITY_LABELS,
   eventSummary,
   formatCheckIn,
   formatQty,
@@ -23,6 +21,7 @@ import {
   unitLabel,
   type WorkOrderStatus,
 } from "@/lib/field-format";
+import { JOB_PRIORITY_LABELS, JOB_STATUS_LABELS } from "@/lib/job-display";
 import { readFailure } from "@/lib/form-errors";
 import { ACTIVE_STATUSES, FINAL_STATUSES, WORK_TRANSITIONS, transitionNeedsNote } from "@/lib/job-status";
 import { getJob, type JobDetail, type JobEventDto } from "@/lib/service-jobs";
@@ -43,7 +42,7 @@ export const metadata: Metadata = { title: "Job" };
 export const dynamic = "force-dynamic";
 export const maxDuration = 25;
 
-const priorities = JOB_PRIORITIES.map((value) => ({ value, label: PRIORITY_LABELS[value] }));
+const priorities = JOB_PRIORITIES.map((value) => ({ value, label: JOB_PRIORITY_LABELS[value] }));
 
 export default async function JobPage({ params }: PageProps<"/jobs/[id]">) {
   const user = await requireRoleOrRedirect("dispatcher");
@@ -102,7 +101,7 @@ export default async function JobPage({ params }: PageProps<"/jobs/[id]">) {
       />
       <StatGrid>
         <StatTile value={JOB_STATUS_LABELS[job.status]} label="Status" tone="accent" />
-        <StatTile value={PRIORITY_LABELS[job.priority]} label="Priority" />
+        <StatTile value={JOB_PRIORITY_LABELS[job.priority]} label="Priority" />
         <StatTile value={`#${job.number}`} label="Job number" />
         <StatTile value={job.notes.length} label={job.notes.length === 1 ? "Note" : "Notes"} />
       </StatGrid>
@@ -222,7 +221,7 @@ export default async function JobPage({ params }: PageProps<"/jobs/[id]">) {
           <ul className="mb-4 grid gap-3">
             {job.notes.map((note) => (
               <li key={note.id} className="min-w-0 rounded-card border border-border bg-background px-3 py-3">
-                <p className="whitespace-pre-wrap break-words [overflow-wrap:anywhere]">{note.body}</p>
+                <p className="whitespace-pre-wrap wrap-anywhere">{note.body}</p>
                 <p className="mt-2 text-sm text-muted">
                   <span className={wrapText}>{note.authorName}</span>
                   {" · "}
@@ -332,7 +331,7 @@ function WorkOrderBody({ job, order }: { job: JobDetail; order: WorkOrderDto }) 
       )}
       <div className="space-y-1">
         <h3 className="text-sm font-semibold">Summary</h3>
-        <p className="whitespace-pre-wrap break-words [overflow-wrap:anywhere]">{order.summary || "No summary."}</p>
+        <p className="whitespace-pre-wrap wrap-anywhere">{order.summary || "No summary."}</p>
       </div>
       <div className="space-y-2">
         <h3 className="text-sm font-semibold">Tasks</h3>
@@ -352,7 +351,7 @@ function WorkOrderBody({ job, order }: { job: JobDetail; order: WorkOrderDto }) 
       {order.followUp && (
         <div className="space-y-1">
           <h3 className="text-sm font-semibold">Follow-up</h3>
-          <p className="whitespace-pre-wrap break-words [overflow-wrap:anywhere]">{order.followUp}</p>
+          <p className="whitespace-pre-wrap wrap-anywhere">{order.followUp}</p>
         </div>
       )}
       <div className="space-y-2">

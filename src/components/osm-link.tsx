@@ -7,7 +7,7 @@ export function OsmLink({ lat, lng }: { lat: number; lng: number }) {
   if (!href) return null;
   return (
     <a href={href} target="_blank" rel="noopener noreferrer" className={`${buttonSecondary} h-auto w-full whitespace-normal sm:w-auto`}>
-      <span className="min-w-0 break-words [overflow-wrap:anywhere]">
+      <span className="min-w-0 wrap-anywhere">
         OpenStreetMap ({lat}, {lng})
       </span>
       <span aria-hidden>↗</span>

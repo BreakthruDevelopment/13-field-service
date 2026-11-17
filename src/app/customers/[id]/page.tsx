@@ -7,7 +7,8 @@ import { OsmLink } from "@/components/osm-link";
 import { type Column, DataList, PageIntro, Panel, StatGrid, StatTile, buttonSecondary } from "@/components/ui";
 import { requireRoleOrRedirect } from "@/lib/auth/session";
 import { getCustomer } from "@/lib/customers";
-import { PRIORITY_LABELS, formatUtc } from "@/lib/field-format";
+import { formatUtc } from "@/lib/field-format";
+import { JOB_PRIORITY_LABELS } from "@/lib/job-display";
 import { readFailure } from "@/lib/form-errors";
 import type { JobSummary } from "@/lib/service-jobs";
 import { AddSiteForm, EditCustomerForm, EditSiteForm } from "../forms";
@@ -52,7 +53,7 @@ export default async function CustomerPage({ params }: PageProps<"/customers/[id
       ),
     },
     { key: "status", header: "Status", cell: (job) => <JobStatusBadge status={job.status} /> },
-    { key: "priority", header: "Priority", cell: (job) => PRIORITY_LABELS[job.priority] },
+    { key: "priority", header: "Priority", cell: (job) => JOB_PRIORITY_LABELS[job.priority] },
     { key: "site", header: "Site", cell: (job) => job.site.label },
     { key: "assignee", header: "Technician", cell: (job) => job.assignee?.name || "Unassigned" },
     {

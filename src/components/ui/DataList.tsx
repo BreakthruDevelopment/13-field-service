@@ -59,11 +59,11 @@ export function DataList<T>({
                 <tr key={rowKey(row)}>
                   {columns.map((c) =>
                     c === primary ? (
-                      <th key={c.key} scope="row" className={`min-w-0 px-3 py-3 text-left align-middle font-normal break-words [overflow-wrap:anywhere] ${c.className ?? ""}`}>
+                      <th key={c.key} scope="row" className={`min-w-0 px-3 py-3 text-left align-middle font-normal wrap-anywhere ${c.className ?? ""}`}>
                         {c.cell(row)}
                       </th>
                     ) : (
-                      <td key={c.key} className={`min-w-0 px-3 py-3 align-middle break-words [overflow-wrap:anywhere] ${c.className ?? ""}`}>
+                      <td key={c.key} className={`min-w-0 px-3 py-3 align-middle wrap-anywhere ${c.className ?? ""}`}>
                         {c.cell(row)}
                       </td>
                     ),
@@ -80,14 +80,14 @@ export function DataList<T>({
       >
         {rows.map((row) => (
           <li key={rowKey(row)} className="min-w-0 space-y-2 rounded-card border border-border bg-surface p-4">
-            <h3 className="min-w-0 font-semibold break-words [overflow-wrap:anywhere]">{primary.cell(row)}</h3>
+            <h3 className="min-w-0 font-semibold wrap-anywhere">{primary.cell(row)}</h3>
             <dl className="space-y-1 text-sm">
               {rest
                 .filter((c) => !c.hideLabel)
                 .map((c) => (
                   <div key={c.key} className="flex items-baseline justify-between gap-4">
                     <dt className="shrink-0 text-muted">{c.header}</dt>
-                    <dd className="min-w-0 text-right break-words [overflow-wrap:anywhere]">{c.cell(row)}</dd>
+                    <dd className="min-w-0 text-right wrap-anywhere">{c.cell(row)}</dd>
                   </div>
                 ))}
             </dl>

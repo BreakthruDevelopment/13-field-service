@@ -1,29 +1,13 @@
+import { JOB_STATUS_LABELS } from "@/lib/job-display";
 import type { JobStatus } from "@/lib/job-status";
 
 /**
  * Labels and the check-in sentence the dispatcher job page shows.
  * Check-in copy follows the geolocation decision: "Checked in ±25 m, 140 m from site",
  * always marked device-reported. No map tiles — only an OpenStreetMap link.
+ *
+ * Job status and priority labels live in `job-display.ts`, which the board and the jobs list already use.
  */
-
-export const JOB_STATUS_LABELS: Record<JobStatus, string> = {
-  unassigned: "Unassigned",
-  scheduled: "Scheduled",
-  en_route: "En route",
-  on_site: "On site",
-  on_hold: "On hold",
-  completed: "Completed",
-  cancelled: "Cancelled",
-};
-
-export const PRIORITY_LABELS = {
-  low: "Low",
-  normal: "Normal",
-  high: "High",
-  emergency: "Emergency",
-} as const;
-
-export type Priority = keyof typeof PRIORITY_LABELS;
 
 export const WORK_ORDER_STATUS_LABELS = {
   draft: "Draft",
