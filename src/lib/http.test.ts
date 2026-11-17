@@ -80,6 +80,18 @@ describe("errorResponse logging (issue #16)", () => {
     expect(lines).toContain("provider exploded");
   });
 
+  it("maps a foreign-key violation to 404 without logging it (issue #13)", async () => {
+    const cause = Object.assign(new Error(`insert or update violates foreign key constraint (${CANARY})`), {
+      code: "23503",
+      constraint_name: "service_job_customer_id_customer_id_fk",
+    });
+    const err = new DrizzleQueryError('insert into "service_job" ("customer_id") values ($1)', [CANARY], cause);
+    const { res, lines } = await logged(err);
+    expect(res.status).toBe(404);
+    expect(await res.json()).toEqual({ error: "Not found" });
+    expect(lines).toBe("[]");
+  });
+
   it("maps typed errors without logging them", async () => {
     const { log } = await import("@/lib/log");
     const spy = vi.spyOn(log, "error").mockImplementation(() => {});
