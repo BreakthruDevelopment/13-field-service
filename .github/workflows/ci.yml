@@ -59,6 +59,13 @@ jobs:
           for i in $(seq 1 30); do curl -fsS localhost:3000/api/health && break; sleep 1; done
       - name: End-to-end smoke test
         run: bash scripts/smoke.sh
+      - name: Offline technician end-to-end test
+        # Real Chrome against the real /tech screens: service worker, offline note and check-in, outbox, sync, logout
+        # wipe. Nothing else in this job notices if the offline PWA stops queueing work.
+        run: |
+          CHROME="$(command -v google-chrome || command -v google-chrome-stable || true)"
+          [ -n "$CHROME" ] || { echo "no Chrome on this runner; the offline test needs one"; exit 1; }
+          CHROME_PATH="$CHROME" pnpm e2e:offline
       - name: App log on failure
         if: failure()
         run: tail -100 app.log || true
