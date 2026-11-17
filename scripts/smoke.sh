@@ -34,11 +34,11 @@ echo "$page" | grep -qi 'technician' || fail "landing should describe field serv
 echo "$page" | grep -q 'Sign in' || fail "landing should offer sign in"
 pass "pages render inside the shared shell"
 
-for path in /dashboard /admin /parts /board /jobs /jobs/new; do
+for path in /dashboard /admin /parts /board /jobs /jobs/new /customers /jobs/00000000-0000-4000-8000-000000000001; do
   code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE_URL$path")
   [ "$code" = "307" ] || fail "signed-out $path should redirect (307), got $code"
 done
-pass "signed-out dashboard, admin, parts, board and jobs redirect"
+pass "signed-out dashboard, admin, parts, board, jobs, new job, customers and job detail redirect"
 
 # The installable offline app (13.2): the worker is never cached, the manifest opens /tech, location is ours alone.
 sw_headers=$(curl -fsS -D - -o "$TMP/sw.js" "$BASE_URL/sw.js" | tr -d '\r') || fail "/sw.js is unreachable"
@@ -55,6 +55,8 @@ page_headers=$(curl -fsS -D - -o /dev/null "$BASE_URL/" | tr -d '\r') || fail "l
 echo "$page_headers" | grep -iq '^permissions-policy:.*geolocation=(self)' || fail "Permissions-Policy should allow geolocation for this origin only"
 code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE_URL/tech")
 [ "$code" = "307" ] || fail "signed-out /tech should redirect (307), got $code"
+code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE_URL/waiting")
+[ "$code" = "307" ] || fail "signed-out /waiting should redirect (307), got $code"
 clear_headers=$(curl -s -D - -o /dev/null -X POST -H "origin: $BASE_URL" "$BASE_URL/api/session/clear" | tr -d '\r')
 echo "$clear_headers" | grep -iq '^clear-site-data: "cache", "storage"' || fail "/api/session/clear should answer Clear-Site-Data: $clear_headers"
 pass "service worker is no-store, manifest opens /tech, geolocation is self-only, /api/session/clear sends Clear-Site-Data"
@@ -157,6 +159,22 @@ for path in /board /jobs /jobs/new; do
 done
 pass "dispatcher board, jobs list and new job render; technicians are redirected"
 
+# Technician PWA shell (13.6). The HTML is the cached shell: job rows load on the phone, so the response names the
+# screen and the empty states, not a customer. A new sign-up waits on /waiting.
+page=$(curl -fsS -b "$JAR_T1" "$BASE_URL/tech") || fail "technician /tech did not render"
+echo "$page" | grep -q 'My jobs' || fail "technician /tech missing My jobs"
+echo "$page" | grep -q 'Loading your jobs' || fail "technician /tech should render the shell before job data"
+echo "$page" | grep -q 'Needs attention' || fail "technician /tech missing Needs attention"
+echo "$page" | grep -q 'Explore breakthruventures.ai' || fail "technician /tech missing the shared footer"
+code=$(curl -s -o /dev/null -w '%{http_code}' -b "$JAR_N" "$BASE_URL/tech")
+[ "$code" = "307" ] || fail "a new sign-up /tech should redirect (307), got $code"
+page=$(curl -fsS -b "$JAR_N" "$BASE_URL/waiting") || fail "new sign-up /waiting did not render"
+echo "$page" | grep -q 'An admin needs to give you access' || fail "waiting page should say an admin needs to give access"
+echo "$page" | grep -q 'Explore breakthruventures.ai' || fail "waiting page missing the shared footer"
+code=$(curl -s -o /dev/null -w '%{http_code}' -b "$JAR_T1" "$BASE_URL/waiting")
+[ "$code" = "307" ] || fail "technician /waiting should redirect (307), got $code"
+pass "technician shell and waiting page render for the right roles"
+
 # --- a new sign-up has no role -----------------------------------------------------------------------------------
 
 api "" GET /api/jobs; want 401 "anonymous job list"
@@ -199,6 +217,28 @@ echo "$page" | grep -qF "Smoke job $RUN_ID" || fail "board missing the assigned 
 page=$(curl -fsS -b "$JAR_D" "$BASE_URL/jobs/new") || fail "dispatcher /jobs/new after creating a customer did not render"
 echo "$page" | grep -qF "Smoke Co $RUN_ID" || fail "new job form should list the smoke customer"
 pass "dispatcher sees the new job on /jobs and /board, and the customer on /jobs/new"
+
+page=$(curl -fsS -b "$JAR_D" "$BASE_URL/customers?q=Smoke%20Co%20$RUN_ID") || fail "dispatcher /customers did not render"
+echo "$page" | grep -q "Smoke Co $RUN_ID" || fail "dispatcher /customers search missing the customer"
+echo "$page" | grep -q 'Add a customer' || fail "dispatcher /customers missing the add form"
+page=$(curl -fsS -b "$JAR_D" "$BASE_URL/customers/$CUSTOMER") || fail "dispatcher customer page did not render"
+echo "$page" | grep -q "Smoke Co $RUN_ID" || fail "customer page missing the name"
+echo "$page" | grep -q '1 Smoke St' || fail "customer page missing the site address"
+echo "$page" | grep -q 'Add a site' || fail "customer page missing the add-site form"
+echo "$page" | grep -q "Smoke job $RUN_ID" || fail "customer page missing the job"
+echo "$page" | grep -q "/jobs/$JOB" || fail "customer page missing the job link"
+page=$(curl -fsS -b "$JAR_D" "$BASE_URL/jobs/$JOB") || fail "dispatcher job page did not render"
+echo "$page" | grep -q "Smoke job $RUN_ID" || fail "job page missing the title"
+echo "$page" | grep -q 'No work order yet' || fail "job page should say there is no work order yet"
+echo "$page" | grep -q 'smoke@example.test' || fail "job page missing the customer email"
+echo "$page" | grep -q '555-0100' || fail "job page missing the customer phone"
+code=$(curl -s -o /dev/null -w '%{http_code}' -b "$JAR_T1" "$BASE_URL/customers")
+[ "$code" = "307" ] || fail "technician /customers should redirect (307), got $code"
+code=$(curl -s -o /dev/null -w '%{http_code}' -b "$JAR_T1" "$BASE_URL/customers/$CUSTOMER")
+[ "$code" = "307" ] || fail "technician customer page should redirect (307), got $code"
+code=$(curl -s -o /dev/null -w '%{http_code}' -b "$JAR_T1" "$BASE_URL/jobs/$JOB")
+[ "$code" = "307" ] || fail "technician job page should redirect (307), got $code"
+pass "dispatcher customer and job pages render; technicians are redirected"
 
 api "$JAR_D" POST /api/jobs '{"customerId":"'"$CUSTOMER"'","siteId":"'"$SITE"'","title":"nul\u0000byte"}'; want 400 "NUL byte in a title"
 api "$JAR_D" POST /api/customers '{"name":"x","phone":"nul\u0000"}'; want 400 "NUL byte in a phone"
@@ -303,6 +343,12 @@ api "$JAR_T1" POST /api/sync '{"ownerId":"'"$ID_T1"'","ops":[{"kind":"status.set
 [ "$(jqr '.results[0].outcome')" = "applied" ] || fail "a reschedule must not stop the technician's next status: $BODY"
 api "$JAR_D" GET "/api/jobs/$SJOB"; want 200 "dispatcher reading the check-in"; V=$(jqr .job.version)
 [ "$(jqr '.job.events[] | select(.toStatus == "on_site") | .checkIn.lat')" = "30.2672" ] || fail "the check-in should be stored to 4 decimals: $BODY"
+page=$(curl -fsS -b "$JAR_D" "$BASE_URL/jobs/$SJOB") || fail "dispatcher sync job page did not render"
+echo "$page" | grep -q 'Device-reported' || fail "job page missing the device-reported check-in label"
+echo "$page" | grep -q 'openstreetmap.org' || fail "job page missing the OpenStreetMap link"
+echo "$page" | grep -q 'from site' || fail "job page missing the check-in distance"
+echo "$page" | grep -F '±25 m' >/dev/null || fail "job page missing the rounded accuracy"
+pass "dispatcher job page shows the check-in distance and an OpenStreetMap link"
 api "$JAR_D" PATCH "/api/jobs/$SJOB" '{"op":"unassign","version":'"$V"'}'; want 200 "the office takes the job back"
 api "$JAR_T1" POST /api/sync '{"ownerId":"'"$ID_T1"'","ops":[{"kind":"note.add","opId":"'"$OP_N2"'","jobId":"'"$SJOB"'","clientAt":"'"$NOW"'","body":"typed after the job was taken back"},{"kind":"status.set","opId":"'"$OP_S3"'","jobId":"'"$SJOB"'","clientAt":"'"$NOW"'","to":"on_hold","baseStatusVersion":'"$((SSV + 2))"',"dependsOn":"'"$OP_S2"'"}]}'; want 200 "ops after reassignment"
 [ "$(jqr '[.results[] | .outcome + ":" + .code] | join(",")')" = "rejected:not_assigned,conflict:not_assigned" ] || fail "after the job was taken back a note is rejected and a status is a conflict: $BODY"
@@ -342,6 +388,9 @@ api "$JAR_T1" PATCH "/api/jobs/$JOB/work-order" '{"op":"edit","clientOpId":"'"$(
 api "$JAR_D" PATCH "/api/jobs/$JOB/work-order" '{"op":"approve","clientOpId":"'"$(uuid)"'","version":'"$((WOV - 1))"'}'; want 409 "approving with a stale version"
 api "$JAR_D" PATCH "/api/jobs/$JOB/work-order" '{"op":"approve","clientOpId":"'"$(uuid)"'","version":'"$WOV"'}'; want 200 "dispatcher approving"
 [ "$(jqr .workOrder.status)" = "approved" ] || fail "the work order should be approved: $BODY"
+page=$(curl -fsS -b "$JAR_D" "$BASE_URL/jobs/$JOB") || fail "dispatcher job page after approve did not render"
+echo "$page" | grep -q 'Approved' || fail "approved work order should show Approved"
+echo "$page" | grep -q 'read-only' || fail "approved work order should say it is read-only"
 pass "AI work order: drafted and replayed once, checked lines, isolated per technician, submitted by the technician and approved by the dispatcher"
 
 # --- dispatcher: versions, schedule, status, reassign ------------------------------------------------------------
