@@ -201,6 +201,10 @@ try {
   // uploads the wrong words, the wrong author or the wrong order still looks perfect in the UI.
   const noteRows = psql(`select author_id || ' | ' || body from job_note where job_id = '${jobId}' order by server_at`);
   if (noteRows !== `${t1Id} | ${NOTE}`) fail(`the server should hold exactly the technician's words, once: ${JSON.stringify(noteRows)}`);
+  // Which ops landed, and the check-in location, are checked by value: dropping the location on upload (the server
+  // takes it as optional) fails this line. The *order* half is belt-and-braces over a server invariant, not something
+  // this test can prove: `dependsOn`, `baseStatusVersion` and the transition rules make the server refuse a reordered
+  // batch on its own, so no client change can reorder these rows.
   const events = psql(`select string_agg(to_status || coalesce(' @' || lat || ',' || lng, ''), ' -> ' order by server_at) from job_event where job_id = '${jobId}' and actor_id = '${t1Id}' and kind = 'status'`);
   if (events !== "en_route -> on_site @30.2672,-97.7431") fail(`both status ops should land once, in order, with the check-in location on on_site only: ${JSON.stringify(events)}`);
   const status = psql(`select status from service_job where id = '${jobId}'`);
@@ -235,12 +239,13 @@ try {
   await page.goto(`${BASE}/tech`);
   // Technician 2 has no jobs: My jobs says so once the phone has been read.
   await see(page.getByText("No jobs on this phone yet"), "technician 2 should be told this phone holds no jobs of theirs", 30_000);
-  const dbs = await page.evaluate(async () => (await indexedDB.databases()).map((d) => d.name).filter((n) => n?.startsWith("fsd-")));
-  if (dbs.length !== 1 || !dbs[0].includes(encodeURIComponent(t2Id))) fail(`only technician 2's database should remain: ${dbs}`);
-  // On the server too: nothing of technician 1's reached the job under technician 2's name.
+  // The server first, so this can fail on its own: behind the device check below it could never speak, because that
+  // check fails first on the same bug. Nothing of technician 1's may reach the job under technician 2's name.
   const foreign = psql(`select count(*) from job_note where job_id = '${jobId}' and author_id <> '${t1Id}'`);
   const foreignEvents = psql(`select count(*) from job_event where job_id = '${jobId}' and actor_id = '${t2Id}'`);
   if (foreign !== "0" || foreignEvents !== "0") fail(`technician 2 must not have written to technician 1's job: notes=${foreign} events=${foreignEvents}`);
+  const dbs = await page.evaluate(async () => (await indexedDB.databases()).map((d) => d.name).filter((n) => n?.startsWith("fsd-")));
+  if (dbs.length !== 1 || !dbs[0].includes(encodeURIComponent(t2Id))) fail(`only technician 2's database should remain: ${dbs}`);
   ok("another technician on the same phone: the previous user's database is gone, only their own remains, and nothing was written to the job as them");
 
   // An unfinished sign-out: the server call is slow and /api/session/clear is blocked. While the flag is set, a second tab
