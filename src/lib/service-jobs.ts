@@ -445,12 +445,21 @@ export async function createJob(actor: Actor, input: unknown): Promise<{ job: Jo
         .where(and(eq(serviceJob.createdBy, actor.id), eq(serviceJob.clientOpId, data.clientOpId)));
       if (existing) return { job: await loadJobDetail(tx, actor, existing.id), created: false };
     }
+    if (data.assigneeId) await requireTechnician(tx, data.assigneeId);
+    // Lock order (caps.ts): the technician's user row, then this job's customer and site, then the cap lock. `for key
+    // share` is the lock the insert's foreign keys would take anyway; taking it here, before the cap lock, decides the
+    // race with a demo reload (which deletes its customers, cascading to their sites, and only then takes the cap
+    // lock). Either this transaction gets there first and the reload waits for it, or the reload already committed and
+    // the row is simply gone: a 404, not the foreign-key violation (23503) this used to become between the check and
+    // the insert. Customer before site, the order the reload's cascade takes them in, so no cycle can form.
+    const [parentCustomer] = await tx.select({ id: customer.id }).from(customer).where(eq(customer.id, data.customerId)).for("key share");
+    if (!parentCustomer) throw new NotFoundError("Customer or site not found");
     const [site_] = await tx
       .select({ id: site.id })
       .from(site)
-      .where(and(eq(site.id, data.siteId), eq(site.customerId, data.customerId)));
+      .where(and(eq(site.id, data.siteId), eq(site.customerId, data.customerId)))
+      .for("key share");
     if (!site_) throw new NotFoundError("Customer or site not found");
-    if (data.assigneeId) await requireTechnician(tx, data.assigneeId);
     await requireOpenCapacity(tx);
 
     const status: JobStatus = data.assigneeId ? "scheduled" : "unassigned";

@@ -30,6 +30,11 @@ export function errorInfo(err: unknown): ErrorInfo {
   if (dbCode(err) === "40P01" || dbCode(err) === "40001") {
     return { status: 409, body: { error: "That was busy. Try again.", code: "retry" } };
   }
+  // A row the write referenced isn't there (23503). Writers lock their parent rows and answer 404 themselves (see
+  // `createJob`); this is the backstop for one that doesn't, so a row deleted mid-request is never a 500.
+  if (dbCode(err) === "23503") {
+    return { status: 404, body: { error: "Not found" } };
+  }
   if (err instanceof AiError) {
     const status = err.kind === "input_rejected" ? 400 : err.kind === "quota" ? 429 : 502;
     return { status, body: { error: err.message } };
