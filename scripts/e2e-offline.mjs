@@ -239,8 +239,10 @@ try {
   await page.goto(`${BASE}/tech`);
   // Technician 2 has no jobs: My jobs says so once the phone has been read.
   await see(page.getByText("No jobs on this phone yet"), "technician 2 should be told this phone holds no jobs of theirs", 30_000);
-  // The server first, so this can fail on its own: behind the device check below it could never speak, because that
-  // check fails first on the same bug. Nothing of technician 1's may reach the job under technician 2's name.
+  // The server before the device check below, so a foreign-authored row fails here too and not only there — on a
+  // broken cross-user wipe the device check is the right one to fire, but a row written as the wrong technician needs
+  // a server-side failure of its own. The query is not a no-op: planting one foreign note and event turns this 0/0
+  // into 1/1. Nothing of technician 1's may reach the job under technician 2's name.
   const foreign = psql(`select count(*) from job_note where job_id = '${jobId}' and author_id <> '${t1Id}'`);
   const foreignEvents = psql(`select count(*) from job_event where job_id = '${jobId}' and actor_id = '${t2Id}'`);
   if (foreign !== "0" || foreignEvents !== "0") fail(`technician 2 must not have written to technician 1's job: notes=${foreign} events=${foreignEvents}`);

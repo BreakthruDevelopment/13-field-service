@@ -2,6 +2,7 @@
 
 import { useId, useRef, useState } from "react";
 import { Panel, StatusBadge, buttonPrimary, buttonSecondary, inputClass, labelClass } from "@/components/ui";
+import { type KeyedOp, opFor } from "@/lib/client-op";
 import { captureCheckInLocation } from "@/lib/offline/geolocation";
 import type { CheckInLocation, JobStatus, TechJob } from "@/lib/offline/types";
 import { useAsyncAction } from "@/lib/use-async-action";
@@ -34,6 +35,8 @@ export function TechJobView({ job, units, online }: { job: TechJob; units: reado
   const [activeTo, setActiveTo] = useState<JobStatus | null>(null);
   const intent = useRef<{ to: JobStatus; checkIn: boolean; fix: Promise<CheckInLocation | null> } | null>(null);
   const statusGate = useRef(false);
+  const noteOp = useRef<KeyedOp | null>(null);
+  const statusOp = useRef<KeyedOp | null>(null);
   const status = jobStatusBadge(job.status);
   const priority = priorityBadge(job.priority);
   const buttons = statusButtons(job.status);
@@ -43,12 +46,22 @@ export function TechJobView({ job, units, online }: { job: TechJob; units: reado
   const serverNotes = job.notes.filter((item) => !item.pending).length;
 
   const noteAction = useAsyncAction(async () => {
+    // The words the technician asked to save, read before any await. The box stays editable while it saves, so what
+    // is in it afterwards is not necessarily what was sent.
+    const sending = note;
     setNoteError(null);
+    // One op id per intent, kept in a ref until the phone confirms it has the note. `enqueue()` stores the op and then
+    // reads the outbox, so a failed read reports an error after the write landed; retrying with a fresh id would queue
+    // the same words twice. Keyed on the job and the text only — never on anything the first attempt itself changed.
+    noteOp.current = opFor(noteOp.current, { jobId: job.id, body: sending });
     try {
-      await data.addNote(job.id, note);
-      setNote("");
+      await data.addNote(job.id, sending, noteOp.current.id);
+      noteOp.current = null; // stored: the next note is a new intent
+      // Clear only the words that were saved. Anything typed while it was saving stays in the box, the same way a
+      // refused note keeps its words rather than being wiped.
+      setNote((current) => (current.startsWith(sending) ? current.slice(sending.length) : current));
     } catch (err) {
-      setNoteError(phoneError(err));
+      setNoteError(phoneError(err)); // op id kept: the retry must reuse it, because the note may already be queued
     }
   });
 
@@ -57,9 +70,13 @@ export function TechJobView({ job, units, online }: { job: TechJob; units: reado
     if (!current) return;
     setStatusError(null);
     setStatusNote(null);
+    // Same reason as the note. The location is deliberately out of the key: a retry captures a fresh fix, and keying on
+    // it would mint a new id and apply the same change twice. The job and the target status are the intent.
+    statusOp.current = opFor(statusOp.current, { jobId: job.id, to: current.to });
     try {
       const location = await current.fix;
-      await data.setStatus(job.id, current.to, { location });
+      await data.setStatus(job.id, current.to, { location, opId: statusOp.current.id });
+      statusOp.current = null;
       if (current.checkIn) {
         setStatusNote(
           location
