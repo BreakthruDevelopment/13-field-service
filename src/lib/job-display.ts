@@ -25,17 +25,21 @@ export type JobPriority = keyof typeof JOB_PRIORITY_LABELS;
 export const JOB_PRIORITY_VALUES = Object.keys(JOB_PRIORITY_LABELS) as JobPriority[];
 
 export function jobStatusTone(status: JobStatus): JobBadgeTone {
+  // StatusBadge collapses ten status names onto four colours: live, healthy and
+  // passed all render bg-live-soft, so the tone name is not the colour. Spread the
+  // seven job statuses across all four buckets rather than piling three into one.
   switch (status) {
-    case "scheduled":
     case "on_site":
+      return "live";
     case "completed":
-      return status === "completed" ? "passed" : "live";
+      return "passed";
+    case "scheduled":
     case "en_route":
-    case "on_hold":
       return "building";
-    case "cancelled":
+    case "on_hold":
       return "blocked";
     default:
+      // unassigned and cancelled: neither is a problem to act on.
       return "not-started";
   }
 }
