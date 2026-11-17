@@ -34,11 +34,11 @@ echo "$page" | grep -qi 'technician' || fail "landing should describe field serv
 echo "$page" | grep -q 'Sign in' || fail "landing should offer sign in"
 pass "pages render inside the shared shell"
 
-for path in /dashboard /admin /parts; do
+for path in /dashboard /admin /parts /board /jobs /jobs/new; do
   code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE_URL$path")
   [ "$code" = "307" ] || fail "signed-out $path should redirect (307), got $code"
 done
-pass "signed-out dashboard, admin and parts redirect"
+pass "signed-out dashboard, admin, parts, board and jobs redirect"
 
 # The installable offline app (13.2): the worker is never cached, the manifest opens /tech, location is ours alone.
 sw_headers=$(curl -fsS -D - -o "$TMP/sw.js" "$BASE_URL/sw.js" | tr -d '\r') || fail "/sw.js is unreachable"
@@ -46,7 +46,13 @@ echo "$sw_headers" | grep -iq '^cache-control:.*no-store' || fail "/sw.js must b
 grep -q '/api/' "$TMP/sw.js" && grep -q 'fsd-' "$TMP/sw.js" || fail "/sw.js does not look like the service worker"
 manifest=$(curl -fsS "$BASE_URL/manifest.webmanifest") || fail "manifest unreachable"
 [ "$(echo "$manifest" | jq -r '.start_url + " " + .scope + " " + .display')" = "/tech /tech standalone" ] || fail "manifest should open /tech standalone: $manifest"
-curl -fsS -D - -o /dev/null "$BASE_URL/" | tr -d '\r' | grep -iq '^permissions-policy:.*geolocation=(self)' || fail "Permissions-Policy should allow geolocation for this origin only"
+# Captured first, like sw_headers above: `grep -q` exits at the first match, and whatever is still writing into the
+# pipe then dies of SIGPIPE, which `set -o pipefail` turns into a failed check that actually passed. Never pipe a
+# command straight into `grep -q` here. The `echo "$page" | grep -q` checks below are safe only because a page fits
+# the 64 KB pipe buffer, so the write finishes whatever grep does (measured: 0 failures in 300 at 19.5 KB; 50 in 50
+# with a 200 KB string matching on line 1).
+page_headers=$(curl -fsS -D - -o /dev/null "$BASE_URL/" | tr -d '\r') || fail "landing headers unreachable"
+echo "$page_headers" | grep -iq '^permissions-policy:.*geolocation=(self)' || fail "Permissions-Policy should allow geolocation for this origin only"
 code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE_URL/tech")
 [ "$code" = "307" ] || fail "signed-out /tech should redirect (307), got $code"
 clear_headers=$(curl -s -D - -o /dev/null -X POST -H "origin: $BASE_URL" "$BASE_URL/api/session/clear" | tr -d '\r')
@@ -134,6 +140,23 @@ code=$(curl -s -o /dev/null -w '%{http_code}' -b "$JAR_T1" "$BASE_URL/parts")
 [ "$code" = "307" ] || fail "technician /parts should redirect (307), got $code"
 pass "dispatcher parts catalog renders; technicians are redirected"
 
+page=$(curl -fsS -b "$JAR_D" "$BASE_URL/board") || fail "dispatcher /board did not render"
+echo "$page" | grep -q 'Schedule board' || fail "dispatcher /board missing the heading"
+echo "$page" | grep -q 'Unassigned' || fail "dispatcher /board missing the unassigned tray"
+echo "$page" | grep -q 'Explore breakthruventures.ai' || fail "dispatcher /board missing the shared footer"
+if echo "$page" | grep -q 'The schedule board is being built'; then fail "dispatcher /board is still the placeholder"; fi
+page=$(curl -fsS -b "$JAR_D" "$BASE_URL/jobs") || fail "dispatcher /jobs did not render"
+echo "$page" | grep -q 'New job' || fail "dispatcher /jobs missing the new job link"
+if echo "$page" | grep -q 'This page is being built'; then fail "dispatcher /jobs is still the placeholder"; fi
+page=$(curl -fsS -b "$JAR_D" "$BASE_URL/jobs/new") || fail "dispatcher /jobs/new did not render"
+echo "$page" | grep -q 'New job' || fail "dispatcher /jobs/new missing the heading"
+echo "$page" | grep -q 'Customer' || fail "dispatcher /jobs/new missing the customer picker"
+for path in /board /jobs /jobs/new; do
+  code=$(curl -s -o /dev/null -w '%{http_code}' -b "$JAR_T1" "$BASE_URL$path")
+  [ "$code" = "307" ] || fail "technician $path should redirect (307), got $code"
+done
+pass "dispatcher board, jobs list and new job render; technicians are redirected"
+
 # --- a new sign-up has no role -----------------------------------------------------------------------------------
 
 api "" GET /api/jobs; want 401 "anonymous job list"
@@ -168,6 +191,14 @@ api "$JAR_D" POST /api/jobs "$JOB_BODY"; want 200 "replay job"
 api "$JAR_D" GET "/api/jobs?q=Smoke%20job%20$RUN_ID"; want 200 "search jobs"
 [ "$(jqr '.jobs | length')" = "1" ] || fail "replaying a client op id must leave one job, got: $BODY"
 pass "dispatcher created a job for technician 1; retrying the same client op id made one job"
+
+page=$(curl -fsS -b "$JAR_D" "$BASE_URL/jobs?q=Smoke%20job%20$RUN_ID") || fail "dispatcher /jobs search did not render"
+echo "$page" | grep -qF "Smoke job $RUN_ID" || fail "jobs list missing the smoke job"
+page=$(curl -fsS -b "$JAR_D" "$BASE_URL/board?date=$DAY") || fail "dispatcher /board for the job's day did not render"
+echo "$page" | grep -qF "Smoke job $RUN_ID" || fail "board missing the assigned smoke job"
+page=$(curl -fsS -b "$JAR_D" "$BASE_URL/jobs/new") || fail "dispatcher /jobs/new after creating a customer did not render"
+echo "$page" | grep -qF "Smoke Co $RUN_ID" || fail "new job form should list the smoke customer"
+pass "dispatcher sees the new job on /jobs and /board, and the customer on /jobs/new"
 
 api "$JAR_D" POST /api/jobs '{"customerId":"'"$CUSTOMER"'","siteId":"'"$SITE"'","title":"nul\u0000byte"}'; want 400 "NUL byte in a title"
 api "$JAR_D" POST /api/customers '{"name":"x","phone":"nul\u0000"}'; want 400 "NUL byte in a phone"
